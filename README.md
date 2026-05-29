@@ -65,16 +65,60 @@ const pluginAdapter = createPluginAdapter({
 const currentPayload = pluginAdapter.map({ id: 'plugin:1', label: 'Import me' });
 ```
 
+## DOM Snapshot And Compiled UI Migration
+
+`frontier-migrations` also handles serialized renderer artifacts without depending on `frontier-dom`. DOM wire versions stay untouched; app/UI data versions live in `source.dataVersion`, `manifest.source.dataVersion`, or an explicit migration artifact wrapper.
+
+```ts
+import {
+  createMigrationArtifact,
+  createMigrationRegistry,
+  createPathMoveMigration,
+  migrateArtifact,
+  migrateDomCompiledView,
+  migrateDomSerializedState
+} from '@shapeshift-labs/frontier-migrations';
+
+const uiMigrations = createMigrationRegistry({
+  id: 'todo-ui',
+  currentVersion: 'ui@2',
+  migrations: [
+    createPathMoveMigration({
+      id: 'snapshot.todo-title',
+      from: 'ui@1',
+      to: 'ui@2',
+      read: '/snapshot/todos/0/text',
+      write: '/snapshot/todos/0/title'
+    })
+  ]
+});
+
+const migratedState = migrateDomSerializedState(uiMigrations, serializedDomState);
+app.hydrate(migratedState.data);
+
+const migratedCompiledView = migrateDomCompiledView(uiMigrations, compiledView, {
+  dataVersionPaths: ['/manifest/source/dataVersion']
+});
+app.hydrate(migratedCompiledView.data);
+
+const artifact = createMigrationArtifact('frontier.dom.compiled', 'ui@1', compiledView);
+const migratedArtifact = migrateArtifact(uiMigrations, artifact);
+```
+
+This makes UI-state versioning the same boundary workflow as database snapshots, plugin payloads, CRDT/server snapshots, and cached app state: import old data, migrate once, then let the app and renderer consume only the current shape.
+
 ## Design Notes
 
 `frontier-migrations` deliberately owns the import boundary, not long-lived backwards-compatible app branches.
 
 - The app runtime should operate on current data only.
-- Importers can read raw database snapshots, CRDT/server snapshots, local cache payloads, plugin payloads, third-party API payloads, or fixture files.
+- Importers can read raw database snapshots, CRDT/server snapshots, local cache payloads, plugin payloads, third-party API payloads, fixture files, serialized DOM state, compiled DOM views, and render manifests.
 - `createMigrationRegistry(...)` plans deterministic version paths and throws on missing, cyclic, or ambiguous chains.
 - `migrate(...)` is sync and allocation-light for local storage and plugin adapters.
 - `migrateAsync(...)` supports async migration steps for boundary work that must consult external data.
 - `createVersionedEnvelope(...)` keeps durable snapshots self-describing without forcing a particular database schema.
+- `createMigrationArtifact(...)` keeps compiled renderer artifacts and other non-state payloads self-describing when their native format has its own wire-format version.
+- `migrateDomSerializedState(...)`, `migrateDomCompiledView(...)`, and `migrateDomRenderManifest(...)` are structural helpers; they do not import `frontier-dom` and they preserve DOM `version`/manifest `version` fields.
 - `versionPath`, `getVersion`, and `setVersion` let state-cache, SQL, IndexedDB, file, CRDT, event-log, and server importers keep version metadata wherever their storage contract needs it.
 - `validate(...)` is structural, so `frontier-schema` or application validators can check old and current shapes without becoming package dependencies.
 - Reports include source/plugin/API/actor metadata, exact steps, checksums, reads, writes, warnings, dry-run state, and timings for logging, event replay, Playwright/AI probes, and devtools.
@@ -103,6 +147,7 @@ The published Frontier package family is generated from one shared package catal
 - [`@shapeshift-labs/frontier-scene`](https://www.npmjs.com/package/@shapeshift-labs/frontier-scene): Patch-native 2D/3D scene graph, transform propagation, bounds queries, virtual/culling adapters, spatial invalidation, and camera/frustum materialization.
 - [`@shapeshift-labs/frontier-pathfinding`](https://www.npmjs.com/package/@shapeshift-labs/frontier-pathfinding): Patch-native grid pathfinding, typed-array A*/Dijkstra search, flow fields, connected components, line-of-sight smoothing, dirty-cell invalidation, and scheduler-friendly path jobs.
 - [`@shapeshift-labs/frontier-lod`](https://www.npmjs.com/package/@shapeshift-labs/frontier-lod): Patch-native level-of-detail and significance selection for rendering and computation workloads, compact typed hot paths, multi-observer selection, budget degradation, materialization frames, and scheduler work plans.
+- [`@shapeshift-labs/frontier-route`](https://www.npmjs.com/package/@shapeshift-labs/frontier-route): DOM-neutral app/game route resources, route and scene manifests, match/resolve/transition planning, dependency metadata, sessions, registry graph output, and impact queries.
 - [`@shapeshift-labs/frontier-dom`](https://www.npmjs.com/package/@shapeshift-labs/frontier-dom): Patch-native DOM and host renderer bindings, manifest hydration, JSX runtime/compiler helpers, SSR, devtools, and logging bridges.
 - [`@shapeshift-labs/frontier-playwright`](https://www.npmjs.com/package/@shapeshift-labs/frontier-playwright): Playwright/headless automation probes for Frontier state, DOM, devtools, marks, and timeline queries.
 - [`@shapeshift-labs/frontier-crdt`](https://www.npmjs.com/package/@shapeshift-labs/frontier-crdt): Native CRDT documents, update tooling, awareness, branches, conflict introspection, version frames, and undo.
@@ -137,6 +182,7 @@ Package source repositories:
 - [`siliconjungle/-shapeshift-labs-frontier-scene`](https://github.com/siliconjungle/-shapeshift-labs-frontier-scene)
 - [`siliconjungle/-shapeshift-labs-frontier-pathfinding`](https://github.com/siliconjungle/-shapeshift-labs-frontier-pathfinding)
 - [`siliconjungle/-shapeshift-labs-frontier-lod`](https://github.com/siliconjungle/-shapeshift-labs-frontier-lod)
+- [`siliconjungle/-shapeshift-labs-frontier-route`](https://github.com/siliconjungle/-shapeshift-labs-frontier-route)
 - [`siliconjungle/-shapeshift-labs-frontier-dom`](https://github.com/siliconjungle/-shapeshift-labs-frontier-dom)
 - [`siliconjungle/-shapeshift-labs-frontier-playwright`](https://github.com/siliconjungle/-shapeshift-labs-frontier-playwright)
 - [`siliconjungle/-shapeshift-labs-frontier-crdt`](https://github.com/siliconjungle/-shapeshift-labs-frontier-crdt)
@@ -165,15 +211,18 @@ Run package-local measurements:
 npm run bench
 ```
 
-The benchmark covers deterministic path planning, explain-only reports, small-object migration, versioned-envelope migration, dry-run migration, and a repeated batch import fixture.
+The benchmark covers deterministic path planning, explain-only reports, small-object migration, versioned-envelope migration, dry-run migration, serialized DOM state migration, compiled DOM view migration, artifact-wrapper migration, and a repeated batch import fixture.
 
 Latest local package benchmark on Node v26.1.0, darwin arm64, 10k imported objects and 20 rounds:
 
 | Fixture | Median | p95 |
 | --- | ---: | ---: |
-| `plan-chain-3` | 25.67 us | 217.13 us |
-| `explain-chain-3` | 36.21 us | 161.04 us |
-| `migrate-small-object-chain-3` | 20.29 us | 59.58 us |
-| `migrate-envelope-chain-3` | 22.42 us | 62.79 us |
-| `migrate-dry-run-chain-3` | 19.25 us | 40.29 us |
-| `migrate-batch-10000` | 95.19 ms | 96.19 ms |
+| `plan-chain-3` | 25.92 us | 269.63 us |
+| `explain-chain-3` | 37.63 us | 216.71 us |
+| `migrate-small-object-chain-3` | 21.83 us | 63.29 us |
+| `migrate-envelope-chain-3` | 24.33 us | 70.96 us |
+| `migrate-dry-run-chain-3` | 19.33 us | 46.33 us |
+| `migrate-dom-state-chain-3` | 24.63 us | 128.79 us |
+| `migrate-dom-compiled-chain-3` | 23.92 us | 38.00 us |
+| `migrate-artifact-chain-3` | 33.54 us | 139.83 us |
+| `migrate-batch-10000` | 103.42 ms | 104.55 ms |

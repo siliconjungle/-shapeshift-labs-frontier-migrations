@@ -4,9 +4,13 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import {
   createDefaultValueMigration,
+  createMigrationArtifact,
   createMigrationRegistry,
   createPathMoveMigration,
-  createVersionedEnvelope
+  createVersionedEnvelope,
+  migrateArtifact,
+  migrateDomCompiledView,
+  migrateDomSerializedState
 } from '../dist/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,12 +33,35 @@ const registry = createMigrationRegistry({
   ]
 });
 
+const domStateRegistry = createMigrationRegistry({
+  id: 'bench-dom-state',
+  currentVersion: '4',
+  migrations: [
+    createPathMoveMigration({ id: 'dom-v1-v2-title', from: '1', to: '2', read: '/snapshot/title', write: '/snapshot/name' }),
+    createPathMoveMigration({ id: 'dom-v2-v3-items', from: '2', to: '3', read: '/snapshot/items', write: '/snapshot/records' }),
+    createDefaultValueMigration({ id: 'dom-v3-v4-meta', from: '3', to: '4', path: '/source/imported', value: true })
+  ]
+});
+
+const compiledRegistry = createMigrationRegistry({
+  id: 'bench-dom-compiled',
+  currentVersion: '4',
+  migrations: [
+    createPathMoveMigration({ id: 'compiled-v1-v2-title', from: '1', to: '2', read: '/manifest/bindings/0/text', write: '/manifest/bindings/0/content' }),
+    createDefaultValueMigration({ id: 'compiled-v2-v3-mode', from: '2', to: '3', path: '/manifest/source/hydrationMode', value: 'resume' }),
+    createDefaultValueMigration({ id: 'compiled-v3-v4-basis', from: '3', to: '4', path: '/manifest/source/basis', value: 'current' })
+  ]
+});
+
 const rows = [
   measure('plan-chain-3', () => registry.plan('1').migrations.length),
   measure('explain-chain-3', () => registry.explain(makeState(0)).stepCount),
   measure('migrate-small-object-chain-3', () => registry.migrate(makeState(1)).data.records.length),
   measure('migrate-envelope-chain-3', () => registry.migrate(createVersionedEnvelope('1', makeState(2))).data.records.length),
   measure('migrate-dry-run-chain-3', () => registry.migrate(makeState(3), { dryRun: true }).data.records.length),
+  measure('migrate-dom-state-chain-3', () => migrateDomSerializedState(domStateRegistry, makeDomState(4)).data.snapshot.records.length),
+  measure('migrate-dom-compiled-chain-3', () => migrateDomCompiledView(compiledRegistry, makeCompiledView(5)).data.manifest.bindings.length),
+  measure('migrate-artifact-chain-3', () => migrateArtifact(compiledRegistry, createMigrationArtifact('frontier.dom.compiled', '1', makeCompiledView(6))).artifact.payload.manifest.bindings.length),
   measure('migrate-batch-' + count, () => {
     let total = 0;
     for (let i = 0; i < count; i++) total += registry.migrate(makeState(i)).data.records.length;
@@ -78,6 +105,47 @@ function makeState(index) {
       { id: 'c' + index, value: index + 2 }
     ],
     meta: {}
+  };
+}
+
+function makeDomState(index) {
+  return {
+    kind: 'frontier.dom.state',
+    version: 1,
+    manifest: {
+      version: 1,
+      source: { dataVersion: '1' },
+      bindings: [
+        { id: 'name', text: '/name' }
+      ]
+    },
+    source: { dataVersion: '1' },
+    html: '<section>document ' + index + '</section>',
+    snapshot: {
+      title: 'document ' + index,
+      items: [
+        { id: 'a' + index, value: index },
+        { id: 'b' + index, value: index + 1 },
+        { id: 'c' + index, value: index + 2 }
+      ],
+      meta: {}
+    },
+    layout: []
+  };
+}
+
+function makeCompiledView(index) {
+  return {
+    html: '<button>document ' + index + '</button>',
+    manifest: {
+      version: 1,
+      source: { dataVersion: '1' },
+      bindings: [
+        { id: 'button-text', text: '/title' },
+        { id: 'button-disabled', attr: 'disabled', path: '/disabled' }
+      ]
+    },
+    diagnostics: []
   };
 }
 

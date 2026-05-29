@@ -61,6 +61,56 @@ export interface FrontierMigrationEnvelope<T = unknown> {
   readonly metadata?: unknown;
 }
 
+export type FrontierMigrationArtifactKind =
+  | 'state'
+  | 'frontier.dom.state'
+  | 'frontier.dom.compiled'
+  | 'frontier.dom.manifest'
+  | (string & {});
+
+export interface FrontierMigrationArtifact<T = unknown> {
+  readonly kind: 'frontier.migration.artifact';
+  readonly artifactVersion: string;
+  readonly artifactKind: FrontierMigrationArtifactKind;
+  readonly payload: T;
+  readonly source?: string;
+  readonly plugin?: string;
+  readonly api?: string;
+  readonly metadata?: unknown;
+}
+
+export interface FrontierMigrationArtifactResult<T = unknown> extends FrontierMigrationResult<T> {
+  readonly artifact: FrontierMigrationArtifact<T>;
+}
+
+export interface FrontierDomSerializedStateLike {
+  readonly kind: 'frontier.dom.state';
+  readonly version: number;
+  readonly manifest: unknown;
+  readonly source?: unknown;
+  readonly html?: string;
+  readonly snapshot?: unknown;
+  readonly layout?: unknown;
+  readonly [key: string]: unknown;
+}
+
+export interface FrontierDomCompiledViewLike {
+  readonly html: string;
+  readonly manifest: unknown;
+  readonly diagnostics?: unknown;
+  readonly [key: string]: unknown;
+}
+
+export interface FrontierDomRenderManifestLike {
+  readonly version?: unknown;
+  readonly source?: unknown;
+  readonly [key: string]: unknown;
+}
+
+export interface FrontierDomMigrationOptions extends FrontierMigrationRunOptions {
+  readonly dataVersionPaths?: readonly FrontierMigrationPath[];
+}
+
 export interface FrontierMigrationContext<T = unknown> {
   readonly registryId: string;
   readonly migrationId: string;
@@ -240,10 +290,18 @@ export class FrontierMigrationError extends Error {
 }
 
 const ENVELOPE_KIND = 'frontier.migration.envelope';
+const ARTIFACT_KIND = 'frontier.migration.artifact';
 const RESULT_KIND = 'frontier.migration.result';
 const REPORT_KIND = 'frontier.migration.report';
 const PLAN_KIND = 'frontier.migration.plan';
 const DEFAULT_VERSION_PATH: readonly FrontierMigrationPathPart[] = ['$version'];
+const DOM_STATE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/source/dataVersion', '/manifest/source/dataVersion', '/metadata/dataVersion'];
+const DOM_STATE_WRITE_PATHS: readonly FrontierMigrationPath[] = ['/source/dataVersion'];
+const DOM_STATE_MIRROR_PATHS: readonly FrontierMigrationPath[] = ['/manifest/source/dataVersion'];
+const DOM_COMPILED_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/manifest/source/dataVersion', '/source/dataVersion', '/metadata/dataVersion'];
+const DOM_COMPILED_WRITE_PATHS: readonly FrontierMigrationPath[] = ['/manifest/source/dataVersion'];
+const DOM_MANIFEST_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/source/dataVersion', '/metadata/dataVersion'];
+const DOM_MANIFEST_WRITE_PATHS: readonly FrontierMigrationPath[] = ['/source/dataVersion'];
 
 export function createMigrationRegistry<TCurrent = unknown>(
   options: FrontierMigrationRegistryOptions
@@ -427,6 +485,143 @@ export function isVersionedEnvelope(value: unknown): value is FrontierMigrationE
 
 export function readEnvelopeVersion(value: unknown): string | undefined {
   return isVersionedEnvelope(value) ? value.dataVersion : undefined;
+}
+
+export function createMigrationArtifact<T>(
+  artifactKind: FrontierMigrationArtifactKind,
+  artifactVersion: FrontierMigrationVersion,
+  payload: T,
+  options: Pick<FrontierMigrationArtifact<T>, 'source' | 'plugin' | 'api' | 'metadata'> = {}
+): FrontierMigrationArtifact<T> {
+  return {
+    kind: ARTIFACT_KIND,
+    artifactVersion: normalizeVersion(artifactVersion),
+    artifactKind,
+    payload,
+    ...definedObject(options)
+  };
+}
+
+export function isMigrationArtifact(value: unknown): value is FrontierMigrationArtifact {
+  return isObject(value)
+    && (value as { kind?: unknown }).kind === ARTIFACT_KIND
+    && typeof (value as { artifactVersion?: unknown }).artifactVersion === 'string'
+    && typeof (value as { artifactKind?: unknown }).artifactKind === 'string'
+    && 'payload' in value;
+}
+
+export function readArtifactVersion(value: unknown): string | undefined {
+  return isMigrationArtifact(value) ? value.artifactVersion : undefined;
+}
+
+export function migrateArtifact<TCurrent = unknown, TPayload = unknown>(
+  registry: FrontierMigrationRegistry<TCurrent>,
+  artifact: FrontierMigrationArtifact<TPayload>,
+  options: FrontierMigrationRunOptions = {}
+): FrontierMigrationArtifactResult<TCurrent> {
+  const envelope = createVersionedEnvelope(artifact.artifactVersion, artifact.payload, {
+    source: artifact.source ?? artifact.artifactKind,
+    plugin: artifact.plugin,
+    api: artifact.api,
+    metadata: artifact.metadata
+  });
+  const result = registry.migrate<FrontierMigrationEnvelope<TPayload>>(envelope, artifactRunOptions(artifact, options));
+  return {
+    ...result,
+    artifact: createMigrationArtifact(artifact.artifactKind, result.version, result.data, {
+      source: result.report.source,
+      plugin: result.report.plugin,
+      api: result.report.api,
+      metadata: result.report.metadata ?? artifact.metadata
+    })
+  };
+}
+
+export async function migrateArtifactAsync<TCurrent = unknown, TPayload = unknown>(
+  registry: FrontierMigrationRegistry<TCurrent>,
+  artifact: FrontierMigrationArtifact<TPayload>,
+  options: FrontierMigrationRunOptions = {}
+): Promise<FrontierMigrationArtifactResult<TCurrent>> {
+  const envelope = createVersionedEnvelope(artifact.artifactVersion, artifact.payload, {
+    source: artifact.source ?? artifact.artifactKind,
+    plugin: artifact.plugin,
+    api: artifact.api,
+    metadata: artifact.metadata
+  });
+  const result = await registry.migrateAsync<FrontierMigrationEnvelope<TPayload>>(envelope, artifactRunOptions(artifact, options));
+  return {
+    ...result,
+    artifact: createMigrationArtifact(artifact.artifactKind, result.version, result.data, {
+      source: result.report.source,
+      plugin: result.report.plugin,
+      api: result.report.api,
+      metadata: result.report.metadata ?? artifact.metadata
+    })
+  };
+}
+
+export function readDomDataVersion(
+  value: unknown,
+  options: Pick<FrontierDomMigrationOptions, 'dataVersionPaths'> = {}
+): string | undefined {
+  const version = readFirstMigrationVersion(value, options.dataVersionPaths ?? DOM_STATE_VERSION_PATHS);
+  return version === undefined ? undefined : normalizeVersion(version);
+}
+
+export function writeDomDataVersion(
+  value: unknown,
+  version: FrontierMigrationVersion,
+  options: Pick<FrontierDomMigrationOptions, 'dataVersionPaths'> = {}
+): void {
+  writeMigrationVersionPaths(value, normalizeVersion(version), options.dataVersionPaths ?? DOM_STATE_WRITE_PATHS, []);
+}
+
+export function migrateDomSerializedState<TCurrent = FrontierDomSerializedStateLike>(
+  registry: FrontierMigrationRegistry<TCurrent>,
+  state: FrontierDomSerializedStateLike,
+  options: FrontierDomMigrationOptions = {}
+): FrontierMigrationResult<TCurrent> {
+  return registry.migrate(state, domRunOptions('frontier.dom.state', DOM_STATE_VERSION_PATHS, DOM_STATE_WRITE_PATHS, DOM_STATE_MIRROR_PATHS, options));
+}
+
+export function migrateDomSerializedStateAsync<TCurrent = FrontierDomSerializedStateLike>(
+  registry: FrontierMigrationRegistry<TCurrent>,
+  state: FrontierDomSerializedStateLike,
+  options: FrontierDomMigrationOptions = {}
+): Promise<FrontierMigrationResult<TCurrent>> {
+  return registry.migrateAsync(state, domRunOptions('frontier.dom.state', DOM_STATE_VERSION_PATHS, DOM_STATE_WRITE_PATHS, DOM_STATE_MIRROR_PATHS, options));
+}
+
+export function migrateDomCompiledView<TCurrent = FrontierDomCompiledViewLike>(
+  registry: FrontierMigrationRegistry<TCurrent>,
+  view: FrontierDomCompiledViewLike,
+  options: FrontierDomMigrationOptions = {}
+): FrontierMigrationResult<TCurrent> {
+  return registry.migrate(view, domRunOptions('frontier.dom.compiled', DOM_COMPILED_VERSION_PATHS, DOM_COMPILED_WRITE_PATHS, [], options));
+}
+
+export function migrateDomCompiledViewAsync<TCurrent = FrontierDomCompiledViewLike>(
+  registry: FrontierMigrationRegistry<TCurrent>,
+  view: FrontierDomCompiledViewLike,
+  options: FrontierDomMigrationOptions = {}
+): Promise<FrontierMigrationResult<TCurrent>> {
+  return registry.migrateAsync(view, domRunOptions('frontier.dom.compiled', DOM_COMPILED_VERSION_PATHS, DOM_COMPILED_WRITE_PATHS, [], options));
+}
+
+export function migrateDomRenderManifest<TCurrent = FrontierDomRenderManifestLike>(
+  registry: FrontierMigrationRegistry<TCurrent>,
+  manifest: FrontierDomRenderManifestLike,
+  options: FrontierDomMigrationOptions = {}
+): FrontierMigrationResult<TCurrent> {
+  return registry.migrate(manifest, domRunOptions('frontier.dom.manifest', DOM_MANIFEST_VERSION_PATHS, DOM_MANIFEST_WRITE_PATHS, [], options));
+}
+
+export function migrateDomRenderManifestAsync<TCurrent = FrontierDomRenderManifestLike>(
+  registry: FrontierMigrationRegistry<TCurrent>,
+  manifest: FrontierDomRenderManifestLike,
+  options: FrontierDomMigrationOptions = {}
+): Promise<FrontierMigrationResult<TCurrent>> {
+  return registry.migrateAsync(manifest, domRunOptions('frontier.dom.manifest', DOM_MANIFEST_VERSION_PATHS, DOM_MANIFEST_WRITE_PATHS, [], options));
 }
 
 export function normalizeMigrationVersion(version: FrontierMigrationVersion): string {
@@ -1021,6 +1216,80 @@ function mergeRunOptions(
   next: FrontierMigrationRunOptions | undefined
 ): FrontierMigrationRunOptions {
   return { ...(base || {}), ...(next || {}) };
+}
+
+function artifactRunOptions<T>(
+  artifact: FrontierMigrationArtifact<T>,
+  options: FrontierMigrationRunOptions
+): FrontierMigrationRunOptions {
+  return {
+    ...options,
+    source: options.source ?? artifact.source ?? artifact.artifactKind,
+    plugin: options.plugin ?? artifact.plugin,
+    api: options.api ?? artifact.api,
+    metadata: options.metadata ?? artifact.metadata,
+    writeVersion: options.writeVersion ?? false,
+    getVersion: options.getVersion ?? (() => artifact.artifactVersion)
+  };
+}
+
+function domRunOptions(
+  source: string,
+  readPaths: readonly FrontierMigrationPath[],
+  writePaths: readonly FrontierMigrationPath[],
+  mirrorPaths: readonly FrontierMigrationPath[],
+  options: FrontierDomMigrationOptions
+): FrontierMigrationRunOptions {
+  const userGetVersion = options.getVersion;
+  const userSetVersion = options.setVersion;
+  const customPaths = options.dataVersionPaths;
+  const dataVersionPaths = customPaths ?? readPaths;
+  const primaryWritePaths = customPaths ?? writePaths;
+  const secondaryWritePaths = customPaths ? [] : mirrorPaths;
+  return {
+    ...options,
+    source: options.source ?? source,
+    versionPath: false,
+    getVersion(data, runOptions) {
+      const explicit = userGetVersion?.(data, runOptions);
+      if (explicit !== undefined) return explicit;
+      return readFirstMigrationVersion(data, dataVersionPaths);
+    },
+    setVersion(data, version, runOptions) {
+      if (userSetVersion) {
+        userSetVersion(data, version, runOptions);
+        return;
+      }
+      writeMigrationVersionPaths(data, version, primaryWritePaths, secondaryWritePaths);
+    }
+  };
+}
+
+function readFirstMigrationVersion(data: unknown, paths: readonly FrontierMigrationPath[]): FrontierMigrationVersion | undefined {
+  for (const path of paths) {
+    const value = readMigrationPath(data, path);
+    if (typeof value === 'string' || typeof value === 'number') return value;
+  }
+  return undefined;
+}
+
+function writeMigrationVersionPaths(
+  data: unknown,
+  version: string,
+  paths: readonly FrontierMigrationPath[],
+  mirrorPaths: readonly FrontierMigrationPath[]
+): void {
+  for (const path of paths) writeMigrationPath(data, path, version);
+  for (const path of mirrorPaths) {
+    if (migrationPathParentExists(data, path)) writeMigrationPath(data, path, version);
+  }
+}
+
+function migrationPathParentExists(data: unknown, path: FrontierMigrationPath): boolean {
+  const parts = parseMigrationPath(path);
+  if (parts.length <= 1) return true;
+  const parent = readMigrationPath(data, parts.slice(0, -1));
+  return parent !== undefined && parent !== null && typeof parent === 'object';
 }
 
 async function readRequired<TInput, TCurrent>(options: FrontierMigrationBoundaryOptions<TInput, TCurrent>): Promise<TInput> {

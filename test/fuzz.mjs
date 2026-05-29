@@ -2,7 +2,8 @@ import assert from 'node:assert';
 import {
   createDefaultValueMigration,
   createMigrationRegistry,
-  createPathMoveMigration
+  createPathMoveMigration,
+  migrateDomSerializedState
 } from '../dist/index.js';
 
 const args = parseArgs(process.argv.slice(2));
@@ -62,6 +63,44 @@ for (let i = 0; i < cases; i++) {
   assert.strictEqual(dryInput.$version, '0');
   assert.strictEqual(dryInput.entity.value0, i);
   assert.strictEqual(dry.data.$version, String(steps + 1));
+
+  const domState = {
+    kind: 'frontier.dom.state',
+    version: 1,
+    manifest: {
+      version: 1,
+      source: { dataVersion: '0' },
+      bindings: []
+    },
+    source: { dataVersion: '0' },
+    snapshot: {
+      entity: {
+        id: 'dom:' + i,
+        value0: i
+      }
+    }
+  };
+  const domMigrations = [];
+  for (let step = 0; step < steps; step++) {
+    domMigrations.push(createPathMoveMigration({
+      id: 'dom-move-' + step,
+      from: String(step),
+      to: String(step + 1),
+      read: '/snapshot/entity/value' + step,
+      write: '/snapshot/entity/value' + (step + 1)
+    }));
+  }
+  const domRegistry = createMigrationRegistry({
+    id: 'dom-fuzz-' + i,
+    currentVersion: String(steps),
+    migrations: domMigrations
+  });
+  const domResult = migrateDomSerializedState(domRegistry, domState);
+  assert.strictEqual(domResult.data.version, 1);
+  assert.strictEqual(domResult.data.source.dataVersion, String(steps));
+  assert.strictEqual(domResult.data.manifest.source.dataVersion, String(steps));
+  assert.strictEqual(domResult.data.snapshot.entity.value0, undefined);
+  assert.strictEqual(domResult.data.snapshot.entity['value' + steps], i);
 }
 
 console.log(`frontier migrations fuzz passed: cases=${cases}`);
