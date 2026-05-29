@@ -1,9 +1,12 @@
 import assert from 'node:assert';
 import {
   createDefaultValueMigration,
+  createPatchPathRewriteRule,
   createMigrationRegistry,
   createPathMoveMigration,
-  migrateDomSerializedState
+  migrateDomSerializedState,
+  migrateSyncableSnapshot,
+  rewritePatchPaths
 } from '../dist/index.js';
 
 const args = parseArgs(process.argv.slice(2));
@@ -101,6 +104,41 @@ for (let i = 0; i < cases; i++) {
   assert.strictEqual(domResult.data.manifest.source.dataVersion, String(steps));
   assert.strictEqual(domResult.data.snapshot.entity.value0, undefined);
   assert.strictEqual(domResult.data.snapshot.entity['value' + steps], i);
+
+  const syncMigrations = [];
+  for (let step = 0; step < steps; step++) {
+    syncMigrations.push(createPathMoveMigration({
+      id: 'sync-move-' + step,
+      from: String(step),
+      to: String(step + 1),
+      read: '/entity/value' + step,
+      write: '/entity/value' + (step + 1)
+    }));
+  }
+  const syncRegistry = createMigrationRegistry({
+    id: 'sync-fuzz-' + i,
+    currentVersion: String(steps),
+    migrations: syncMigrations
+  });
+  const syncSnapshot = {
+    basis: { dataVersion: '0', heads: ['actor:' + i], stateVector: { actor: i } },
+    snapshot: {
+      entity: {
+        id: 'sync:' + i,
+        value0: i
+      }
+    }
+  };
+  const syncResult = migrateSyncableSnapshot(syncRegistry, syncSnapshot);
+  assert.strictEqual(syncResult.data.basis.dataVersion, String(steps));
+  assert.strictEqual(syncResult.data.metadata.dataVersion, String(steps));
+  assert.strictEqual(syncResult.data.snapshot.entity.value0, undefined);
+  assert.strictEqual(syncResult.data.snapshot.entity['value' + steps], i);
+  assert.deepStrictEqual(syncResult.data.basis.heads, ['actor:' + i]);
+
+  const rewriteRule = createPatchPathRewriteRule('/entity/value0', '/entity/current', { prefix: false });
+  const rewritten = rewritePatchPaths([[0, ['entity', 'value0'], i]], [rewriteRule]);
+  assert.deepStrictEqual(rewritten[0][1], ['entity', 'current']);
 }
 
 console.log(`frontier migrations fuzz passed: cases=${cases}`);

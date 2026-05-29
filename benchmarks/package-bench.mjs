@@ -7,10 +7,13 @@ import {
   createMigrationArtifact,
   createMigrationRegistry,
   createPathMoveMigration,
+  createPatchPathRewriteRule,
   createVersionedEnvelope,
   migrateArtifact,
   migrateDomCompiledView,
-  migrateDomSerializedState
+  migrateDomSerializedState,
+  migrateSyncableSnapshot,
+  rewritePatchPaths
 } from '../dist/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,6 +56,17 @@ const compiledRegistry = createMigrationRegistry({
   ]
 });
 
+const syncRegistry = createMigrationRegistry({
+  id: 'bench-sync-snapshot',
+  currentVersion: '4',
+  migrations: [
+    createPathMoveMigration({ id: 'sync-v1-v2-title', from: '1', to: '2', read: '/title', write: '/name' }),
+    createPathMoveMigration({ id: 'sync-v2-v3-items', from: '2', to: '3', read: '/items', write: '/records' }),
+    createDefaultValueMigration({ id: 'sync-v3-v4-meta', from: '3', to: '4', path: '/meta/imported', value: true })
+  ]
+});
+const patchRewriteRule = createPatchPathRewriteRule('/items', '/records', { prefix: true });
+
 const rows = [
   measure('plan-chain-3', () => registry.plan('1').migrations.length),
   measure('explain-chain-3', () => registry.explain(makeState(0)).stepCount),
@@ -62,6 +76,8 @@ const rows = [
   measure('migrate-dom-state-chain-3', () => migrateDomSerializedState(domStateRegistry, makeDomState(4)).data.snapshot.records.length),
   measure('migrate-dom-compiled-chain-3', () => migrateDomCompiledView(compiledRegistry, makeCompiledView(5)).data.manifest.bindings.length),
   measure('migrate-artifact-chain-3', () => migrateArtifact(compiledRegistry, createMigrationArtifact('frontier.dom.compiled', '1', makeCompiledView(6))).artifact.payload.manifest.bindings.length),
+  measure('migrate-sync-snapshot-chain-3', () => migrateSyncableSnapshot(syncRegistry, makeSyncSnapshot(7)).data.snapshot.records.length),
+  measure('rewrite-patch-paths-100', () => rewritePatchPaths(makePatchLog(100), [patchRewriteRule]).length),
   measure('migrate-batch-' + count, () => {
     let total = 0;
     for (let i = 0; i < count; i++) total += registry.migrate(makeState(i)).data.records.length;
@@ -132,6 +148,25 @@ function makeDomState(index) {
     },
     layout: []
   };
+}
+
+function makeSyncSnapshot(index) {
+  return {
+    basis: {
+      dataVersion: '1',
+      heads: ['actor:' + index],
+      stateVector: { actor: index }
+    },
+    snapshot: makeState(index)
+  };
+}
+
+function makePatchLog(count) {
+  const out = new Array(count);
+  for (let i = 0; i < count; i++) {
+    out[i] = { id: 'event-' + i, patch: [[0, ['items', i % 3, 'value'], i]] };
+  }
+  return out;
 }
 
 function makeCompiledView(index) {

@@ -6,16 +6,24 @@ import {
   createMigrationBoundary,
   createMigrationRegistry,
   createPathMoveMigration,
+  createPatchPathRewriteRule,
   createPluginAdapter,
   createRenameFieldMigration,
   createVersionedEnvelope,
   migrateArtifact,
+  migrateCrdtSnapshot,
   migrateDomCompiledView,
   migrateDomRenderManifest,
   migrateDomSerializedState,
+  migrateEventLogSnapshot,
+  migrateSnapshotPayload,
+  migrateStateCacheSnapshot,
+  migrateSyncableSnapshot,
   readArtifactVersion,
   readDomDataVersion,
-  readMigrationPath
+  readMigrationPath,
+  rewritePatchPath,
+  rewritePatchPaths
 } from '../dist/index.js';
 
 const registry = createMigrationRegistry({
@@ -208,6 +216,117 @@ assert.strictEqual(readArtifactVersion(artifactResult.artifact), 'ui@2');
 assert.strictEqual(artifactResult.artifact.artifactKind, 'frontier.dom.compiled');
 assert.deepStrictEqual(artifactResult.artifact.payload.manifest.bindings[0], { id: 'p', content: '/label' });
 assert.strictEqual(artifact.payload.manifest.bindings[0].text, '/label');
+
+const syncRegistry = createMigrationRegistry({
+  id: 'sync-state',
+  currentVersion: '2',
+  migrations: [
+    createPathMoveMigration({
+      id: 'sync.todo-title',
+      from: '1',
+      to: '2',
+      read: '/todos/0/text',
+      write: '/todos/0/title'
+    })
+  ]
+});
+const syncSnapshot = {
+  kind: 'frontier.sync.snapshot',
+  basis: {
+    dataVersion: '1',
+    heads: ['a:1'],
+    stateVector: { a: 1 }
+  },
+  snapshot: {
+    todos: [{ id: 'a', text: 'sync me' }]
+  }
+};
+const syncResult = migrateSyncableSnapshot(syncRegistry, syncSnapshot);
+assert.strictEqual(syncResult.payloadPath, '/snapshot');
+assert.deepStrictEqual(syncResult.payload, { todos: [{ id: 'a', title: 'sync me' }] });
+assert.strictEqual(syncResult.data.basis.dataVersion, '2');
+assert.deepStrictEqual(syncResult.data.basis.heads, ['a:1']);
+assert.deepStrictEqual(syncResult.data.basis.stateVector, { a: 1 });
+assert.strictEqual(syncResult.data.metadata.dataVersion, '2');
+assert.strictEqual(syncResult.data.metadata.migrations[0].registryId, 'sync-state');
+
+const crdtSnapshot = {
+  version: { actors: { a: 1 } },
+  heads: ['a:1'],
+  stateVector: { a: 1 },
+  update: new Uint8Array([1, 2, 3]),
+  metadata: { dataVersion: '1' },
+  view: { todos: [{ id: 'crdt', text: 'from crdt' }] }
+};
+const crdtResult = migrateCrdtSnapshot(syncRegistry, crdtSnapshot);
+assert.strictEqual(crdtResult.payloadPath, '/view');
+assert.deepStrictEqual(crdtResult.data.view.todos[0], { id: 'crdt', title: 'from crdt' });
+assert.strictEqual(crdtResult.data.metadata.dataVersion, '2');
+assert.deepStrictEqual(crdtResult.data.heads, ['a:1']);
+assert.deepStrictEqual(Array.from(crdtResult.data.update), [1, 2, 3]);
+
+const cacheRegistry = createMigrationRegistry({
+  id: 'cache-state',
+  currentVersion: '2',
+  migrations: [
+    createPathMoveMigration({
+      id: 'cache.entity-title',
+      from: '1',
+      to: '2',
+      read: '/entities/Todo:a/text',
+      write: '/entities/Todo:a/title'
+    })
+  ]
+});
+const cacheSnapshot = {
+  metadata: { dataVersion: '1' },
+  entities: { 'Todo:a': { id: 'a', text: 'cached' } },
+  queries: []
+};
+const cacheResult = migrateStateCacheSnapshot(cacheRegistry, cacheSnapshot);
+assert.strictEqual(cacheResult.payloadPath, false);
+assert.deepStrictEqual(cacheResult.data.entities['Todo:a'], { id: 'a', title: 'cached' });
+assert.strictEqual(cacheResult.data.metadata.dataVersion, '2');
+
+const directSnapshot = {
+  meta: { version: '1' },
+  body: { todos: [{ id: 'direct', text: 'body' }] }
+};
+const directResult = migrateSnapshotPayload(syncRegistry, directSnapshot, {
+  payloadPath: '/body',
+  dataVersionPaths: ['/meta/version'],
+  writeDataVersionPaths: ['/meta/version'],
+  appendHistory: '/meta/migrations'
+});
+assert.deepStrictEqual(directResult.data.body.todos[0], { id: 'direct', title: 'body' });
+assert.strictEqual(directResult.data.meta.version, '2');
+assert.strictEqual(directResult.data.meta.migrations[0].toVersion, '2');
+
+const rewriteRule = createPatchPathRewriteRule('/todos', '/tasks', { prefix: true });
+assert.deepStrictEqual(rewritePatchPath(['todos', 0, 'text'], [rewriteRule]), ['tasks', 0, 'text']);
+assert.strictEqual(rewritePatchPath('/todos/0/text', [rewriteRule]), '/tasks/0/text');
+const patchLog = [
+  [0, ['todos', 0, 'text'], 'x'],
+  { patch: [[0, '/todos/1/text', 'y']], paths: [['todos', 2, 'text']] }
+];
+const rewrittenLog = rewritePatchPaths(patchLog, [rewriteRule]);
+assert.deepStrictEqual(rewrittenLog[0][1], ['tasks', 0, 'text']);
+assert.deepStrictEqual(rewrittenLog[1].patch[0][1], '/tasks/1/text');
+assert.deepStrictEqual(rewrittenLog[1].paths[0], ['tasks', 2, 'text']);
+assert.deepStrictEqual(patchLog[0][1], ['todos', 0, 'text']);
+
+const eventLogSnapshot = {
+  metadata: { dataVersion: '1' },
+  snapshot: { todos: [{ id: 'event', text: 'from event' }] },
+  events: [
+    { id: 'e1', patch: [[0, ['todos', 0, 'text'], 'later']] }
+  ]
+};
+const eventResult = migrateEventLogSnapshot(syncRegistry, eventLogSnapshot, {
+  patchPathRules: [rewriteRule]
+});
+assert.deepStrictEqual(eventResult.data.snapshot.todos[0], { id: 'event', title: 'from event' });
+assert.deepStrictEqual(eventResult.data.events[0].patch[0][1], ['tasks', 0, 'text']);
 
 const validated = createMigrationRegistry({
   id: 'validated',

@@ -107,6 +107,54 @@ const migratedArtifact = migrateArtifact(uiMigrations, artifact);
 
 This makes UI-state versioning the same boundary workflow as database snapshots, plugin payloads, CRDT/server snapshots, and cached app state: import old data, migrate once, then let the app and renderer consume only the current shape.
 
+## Syncable State And Replay Logs
+
+The same registry can migrate syncable containers while preserving heads, state vectors, updates, and replay metadata.
+
+```ts
+import {
+  createPatchPathRewriteRule,
+  migrateCrdtSnapshot,
+  migrateEventLogSnapshot,
+  migrateStateCacheSnapshot,
+  migrateSyncableSnapshot
+} from '@shapeshift-labs/frontier-migrations';
+
+const stateMigrations = createMigrationRegistry({
+  id: 'todo-state',
+  currentVersion: '2',
+  migrations: [
+    createPathMoveMigration({
+      id: 'todo.title',
+      from: '1',
+      to: '2',
+      read: '/todos/0/text',
+      write: '/todos/0/title'
+    })
+  ]
+});
+
+const migratedSync = migrateSyncableSnapshot(stateMigrations, {
+  basis: { dataVersion: '1', heads, stateVector },
+  snapshot: { todos: [{ id: 'a', text: 'Migrate me' }] }
+});
+
+const migratedCrdt = migrateCrdtSnapshot(stateMigrations, crdtSnapshot);
+const migratedCache = migrateStateCacheSnapshot(cacheMigrations, cache.extract());
+
+const pathRule = createPatchPathRewriteRule('/todos', '/tasks', { prefix: true });
+const migratedLog = migrateEventLogSnapshot(stateMigrations, eventLogSnapshot, {
+  patchPathRules: [pathRule]
+});
+```
+
+`migrateSnapshotPayload(...)` is the generic primitive behind those helpers. It migrates one payload path inside a larger object, writes the current data version back to the container, and can append an inspectable migration history entry. The CRDT/sync/cache/event-log helpers only choose structural defaults:
+
+- sync snapshots: `/snapshot`, `/state`, `/view`, `/data`, or `/cache`
+- CRDT snapshots: `/view` first, then snapshot/state/data fallbacks
+- state-cache snapshots: root payload, because `entities` and `queries` are the durable cache shape
+- event-log snapshots: snapshot payload plus optional patch-path rewrites for replay records
+
 ## Design Notes
 
 `frontier-migrations` deliberately owns the import boundary, not long-lived backwards-compatible app branches.
@@ -119,6 +167,8 @@ This makes UI-state versioning the same boundary workflow as database snapshots,
 - `createVersionedEnvelope(...)` keeps durable snapshots self-describing without forcing a particular database schema.
 - `createMigrationArtifact(...)` keeps compiled renderer artifacts and other non-state payloads self-describing when their native format has its own wire-format version.
 - `migrateDomSerializedState(...)`, `migrateDomCompiledView(...)`, and `migrateDomRenderManifest(...)` are structural helpers; they do not import `frontier-dom` and they preserve DOM `version`/manifest `version` fields.
+- `migrateSyncableSnapshot(...)`, `migrateCrdtSnapshot(...)`, `migrateStateCacheSnapshot(...)`, and `migrateEventLogSnapshot(...)` keep sync metadata intact while migrating the materialized payload to the current app shape.
+- `rewritePatchPaths(...)` and `createPatchPathRewriteRule(...)` update Frontier patch/event-log path references when a schema migration moves a subtree.
 - `versionPath`, `getVersion`, and `setVersion` let state-cache, SQL, IndexedDB, file, CRDT, event-log, and server importers keep version metadata wherever their storage contract needs it.
 - `validate(...)` is structural, so `frontier-schema` or application validators can check old and current shapes without becoming package dependencies.
 - Reports include source/plugin/API/actor metadata, exact steps, checksums, reads, writes, warnings, dry-run state, and timings for logging, event replay, Playwright/AI probes, and devtools.
@@ -211,18 +261,20 @@ Run package-local measurements:
 npm run bench
 ```
 
-The benchmark covers deterministic path planning, explain-only reports, small-object migration, versioned-envelope migration, dry-run migration, serialized DOM state migration, compiled DOM view migration, artifact-wrapper migration, and a repeated batch import fixture.
+The benchmark covers deterministic path planning, explain-only reports, small-object migration, versioned-envelope migration, dry-run migration, serialized DOM state migration, compiled DOM view migration, artifact-wrapper migration, syncable snapshot migration, patch-path rewriting, and a repeated batch import fixture.
 
 Latest local package benchmark on Node v26.1.0, darwin arm64, 10k imported objects and 20 rounds:
 
 | Fixture | Median | p95 |
 | --- | ---: | ---: |
-| `plan-chain-3` | 25.92 us | 269.63 us |
-| `explain-chain-3` | 37.63 us | 216.71 us |
-| `migrate-small-object-chain-3` | 21.83 us | 63.29 us |
-| `migrate-envelope-chain-3` | 24.33 us | 70.96 us |
-| `migrate-dry-run-chain-3` | 19.33 us | 46.33 us |
-| `migrate-dom-state-chain-3` | 24.63 us | 128.79 us |
-| `migrate-dom-compiled-chain-3` | 23.92 us | 38.00 us |
-| `migrate-artifact-chain-3` | 33.54 us | 139.83 us |
-| `migrate-batch-10000` | 103.42 ms | 104.55 ms |
+| `plan-chain-3` | 25.50 us | 229.12 us |
+| `explain-chain-3` | 35.92 us | 166.21 us |
+| `migrate-small-object-chain-3` | 20.83 us | 82.67 us |
+| `migrate-envelope-chain-3` | 22.04 us | 29.58 us |
+| `migrate-dry-run-chain-3` | 19.21 us | 40.08 us |
+| `migrate-dom-state-chain-3` | 23.92 us | 114.92 us |
+| `migrate-dom-compiled-chain-3` | 22.83 us | 34.29 us |
+| `migrate-artifact-chain-3` | 26.83 us | 38.71 us |
+| `migrate-sync-snapshot-chain-3` | 29.38 us | 91.88 us |
+| `rewrite-patch-paths-100` | 159.96 us | 287.42 us |
+| `migrate-batch-10000` | 93.92 ms | 94.10 ms |

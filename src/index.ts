@@ -63,6 +63,10 @@ export interface FrontierMigrationEnvelope<T = unknown> {
 
 export type FrontierMigrationArtifactKind =
   | 'state'
+  | 'frontier.sync.snapshot'
+  | 'frontier.crdt.snapshot'
+  | 'frontier.state-cache.snapshot'
+  | 'frontier.event-log.snapshot'
   | 'frontier.dom.state'
   | 'frontier.dom.compiled'
   | 'frontier.dom.manifest'
@@ -109,6 +113,65 @@ export interface FrontierDomRenderManifestLike {
 
 export interface FrontierDomMigrationOptions extends FrontierMigrationRunOptions {
   readonly dataVersionPaths?: readonly FrontierMigrationPath[];
+}
+
+export interface FrontierSyncableSnapshotLike {
+  readonly kind?: string;
+  readonly dataVersion?: string;
+  readonly basis?: unknown;
+  readonly metadata?: unknown;
+  readonly state?: unknown;
+  readonly snapshot?: unknown;
+  readonly view?: unknown;
+  readonly cache?: unknown;
+  readonly data?: unknown;
+  readonly heads?: unknown;
+  readonly stateVector?: unknown;
+  readonly patches?: unknown;
+  readonly events?: unknown;
+  readonly records?: unknown;
+  readonly [key: string]: unknown;
+}
+
+export interface FrontierSnapshotMigrationOptions extends FrontierMigrationRunOptions {
+  readonly payloadPath?: FrontierMigrationPath | false;
+  readonly payloadPaths?: readonly FrontierMigrationPath[];
+  readonly dataVersionPaths?: readonly FrontierMigrationPath[];
+  readonly writeDataVersionPaths?: readonly FrontierMigrationPath[];
+  readonly appendHistory?: boolean | FrontierMigrationPath;
+}
+
+export interface FrontierEventLogMigrationOptions extends FrontierSnapshotMigrationOptions {
+  readonly patchPathRules?: readonly FrontierPatchPathRewriteRule[];
+  readonly patchLogPaths?: readonly FrontierMigrationPath[];
+}
+
+export interface FrontierSnapshotMigrationResult<TContainer = unknown, TPayload = unknown> extends FrontierMigrationResult<TContainer> {
+  readonly payload: TPayload;
+  readonly payloadPath: FrontierMigrationPath | false;
+}
+
+export interface FrontierMigrationHistoryEntry {
+  readonly kind: 'frontier.migration.history.entry';
+  readonly registryId: string;
+  readonly fromVersion: string;
+  readonly toVersion: string;
+  readonly targetVersion: string;
+  readonly stepCount: number;
+  readonly steps: readonly string[];
+  readonly source?: string;
+  readonly actor?: string;
+  readonly at: string;
+}
+
+export interface FrontierPatchPathRewriteRule {
+  readonly from: FrontierMigrationPath;
+  readonly to: FrontierMigrationPath;
+  readonly prefix?: boolean;
+}
+
+export interface FrontierPatchPathRewriteOptions {
+  readonly clone?: boolean;
 }
 
 export interface FrontierMigrationContext<T = unknown> {
@@ -302,6 +365,19 @@ const DOM_COMPILED_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/manifest
 const DOM_COMPILED_WRITE_PATHS: readonly FrontierMigrationPath[] = ['/manifest/source/dataVersion'];
 const DOM_MANIFEST_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/source/dataVersion', '/metadata/dataVersion'];
 const DOM_MANIFEST_WRITE_PATHS: readonly FrontierMigrationPath[] = ['/source/dataVersion'];
+const SYNCABLE_PAYLOAD_PATHS: readonly FrontierMigrationPath[] = ['/state', '/snapshot', '/view', '/data', '/cache'];
+const SYNCABLE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/basis/dataVersion', '/metadata/dataVersion', '/dataVersion'];
+const SYNCABLE_WRITE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/basis/dataVersion', '/metadata/dataVersion'];
+const CRDT_PAYLOAD_PATHS: readonly FrontierMigrationPath[] = ['/view', '/snapshot', '/state', '/data'];
+const CRDT_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/metadata/dataVersion', '/basis/dataVersion', '/dataVersion'];
+const CRDT_WRITE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/metadata/dataVersion'];
+const STATE_CACHE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/metadata/dataVersion', '/dataVersion'];
+const STATE_CACHE_WRITE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/metadata/dataVersion'];
+const EVENT_LOG_PAYLOAD_PATHS: readonly FrontierMigrationPath[] = ['/snapshot', '/state', '/data'];
+const EVENT_LOG_PATCH_PATHS: readonly FrontierMigrationPath[] = ['/events', '/records', '/patches'];
+const EVENT_LOG_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/metadata/dataVersion', '/basis/dataVersion', '/dataVersion'];
+const EVENT_LOG_WRITE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/metadata/dataVersion'];
+const MIGRATION_HISTORY_PATH: FrontierMigrationPath = '/metadata/migrations';
 
 export function createMigrationRegistry<TCurrent = unknown>(
   options: FrontierMigrationRegistryOptions
@@ -622,6 +698,104 @@ export function migrateDomRenderManifestAsync<TCurrent = FrontierDomRenderManife
   options: FrontierDomMigrationOptions = {}
 ): Promise<FrontierMigrationResult<TCurrent>> {
   return registry.migrateAsync(manifest, domRunOptions('frontier.dom.manifest', DOM_MANIFEST_VERSION_PATHS, DOM_MANIFEST_WRITE_PATHS, [], options));
+}
+
+export function migrateSnapshotPayload<TContainer = FrontierSyncableSnapshotLike, TPayload = unknown>(
+  registry: FrontierMigrationRegistry<TPayload>,
+  container: TContainer,
+  options: FrontierSnapshotMigrationOptions = {}
+): FrontierSnapshotMigrationResult<TContainer, TPayload> {
+  return runSnapshotPayloadMigration(registry, container, options);
+}
+
+export async function migrateSnapshotPayloadAsync<TContainer = FrontierSyncableSnapshotLike, TPayload = unknown>(
+  registry: FrontierMigrationRegistry<TPayload>,
+  container: TContainer,
+  options: FrontierSnapshotMigrationOptions = {}
+): Promise<FrontierSnapshotMigrationResult<TContainer, TPayload>> {
+  return runSnapshotPayloadMigrationAsync(registry, container, options);
+}
+
+export function migrateSyncableSnapshot<TContainer = FrontierSyncableSnapshotLike, TPayload = unknown>(
+  registry: FrontierMigrationRegistry<TPayload>,
+  snapshot: TContainer,
+  options: FrontierSnapshotMigrationOptions = {}
+): FrontierSnapshotMigrationResult<TContainer, TPayload> {
+  return migrateSnapshotPayload(registry, snapshot, {
+    source: 'frontier.sync.snapshot',
+    payloadPaths: SYNCABLE_PAYLOAD_PATHS,
+    dataVersionPaths: SYNCABLE_VERSION_PATHS,
+    writeDataVersionPaths: SYNCABLE_WRITE_VERSION_PATHS,
+    appendHistory: MIGRATION_HISTORY_PATH,
+    ...options
+  });
+}
+
+export function migrateCrdtSnapshot<TContainer = FrontierSyncableSnapshotLike, TPayload = unknown>(
+  registry: FrontierMigrationRegistry<TPayload>,
+  snapshot: TContainer,
+  options: FrontierSnapshotMigrationOptions = {}
+): FrontierSnapshotMigrationResult<TContainer, TPayload> {
+  return migrateSnapshotPayload(registry, snapshot, {
+    source: 'frontier.crdt.snapshot',
+    payloadPaths: CRDT_PAYLOAD_PATHS,
+    dataVersionPaths: CRDT_VERSION_PATHS,
+    writeDataVersionPaths: CRDT_WRITE_VERSION_PATHS,
+    appendHistory: MIGRATION_HISTORY_PATH,
+    ...options
+  });
+}
+
+export function migrateStateCacheSnapshot<TContainer = FrontierSyncableSnapshotLike, TPayload = unknown>(
+  registry: FrontierMigrationRegistry<TPayload>,
+  snapshot: TContainer,
+  options: FrontierSnapshotMigrationOptions = {}
+): FrontierSnapshotMigrationResult<TContainer, TPayload> {
+  return migrateSnapshotPayload(registry, snapshot, {
+    source: 'frontier.state-cache.snapshot',
+    payloadPath: false,
+    dataVersionPaths: STATE_CACHE_VERSION_PATHS,
+    writeDataVersionPaths: STATE_CACHE_WRITE_VERSION_PATHS,
+    appendHistory: MIGRATION_HISTORY_PATH,
+    ...options
+  });
+}
+
+export function migrateEventLogSnapshot<TContainer = FrontierSyncableSnapshotLike, TPayload = unknown>(
+  registry: FrontierMigrationRegistry<TPayload>,
+  snapshot: TContainer,
+  options: FrontierEventLogMigrationOptions = {}
+): FrontierSnapshotMigrationResult<TContainer, TPayload> {
+  const result = migrateSnapshotPayload(registry, snapshot, {
+    source: 'frontier.event-log.snapshot',
+    payloadPaths: EVENT_LOG_PAYLOAD_PATHS,
+    dataVersionPaths: EVENT_LOG_VERSION_PATHS,
+    writeDataVersionPaths: EVENT_LOG_WRITE_VERSION_PATHS,
+    appendHistory: MIGRATION_HISTORY_PATH,
+    ...options
+  });
+  if (options.patchPathRules && options.patchPathRules.length !== 0) {
+    rewritePatchLogs(result.data, options.patchPathRules, options.patchLogPaths ?? EVENT_LOG_PATCH_PATHS);
+  }
+  return result;
+}
+
+export function createPatchPathRewriteRule(
+  from: FrontierMigrationPath,
+  to: FrontierMigrationPath,
+  options: Pick<FrontierPatchPathRewriteRule, 'prefix'> = {}
+): FrontierPatchPathRewriteRule {
+  return { from, to, ...definedObject(options) };
+}
+
+export function rewritePatchPath<T extends FrontierMigrationPath>(path: T, rules: readonly FrontierPatchPathRewriteRule[]): T {
+  return rewritePathLike(path, rules) as T;
+}
+
+export function rewritePatchPaths<T>(input: T, rules: readonly FrontierPatchPathRewriteRule[], options: FrontierPatchPathRewriteOptions = {}): T {
+  if (rules.length === 0) return input;
+  const target = options.clone === false ? input : defaultClone(input);
+  return rewritePatchContainer(target, rules, 0) as T;
 }
 
 export function normalizeMigrationVersion(version: FrontierMigrationVersion): string {
@@ -1290,6 +1464,227 @@ function migrationPathParentExists(data: unknown, path: FrontierMigrationPath): 
   if (parts.length <= 1) return true;
   const parent = readMigrationPath(data, parts.slice(0, -1));
   return parent !== undefined && parent !== null && typeof parent === 'object';
+}
+
+function runSnapshotPayloadMigration<TContainer, TPayload>(
+  registry: FrontierMigrationRegistry<TPayload>,
+  container: TContainer,
+  options: FrontierSnapshotMigrationOptions
+): FrontierSnapshotMigrationResult<TContainer, TPayload> {
+  const targetContainer = options.dryRun === true ? cloneForSnapshot(container, options) : container;
+  const payloadPath = resolveSnapshotPayloadPath(targetContainer, options);
+  const payload = readSnapshotPayload(targetContainer, payloadPath);
+  const result = registry.migrate(payload, snapshotPayloadRunOptions(targetContainer, payload, options));
+  const data = writeSnapshotPayloadResult(targetContainer, payloadPath, result.data);
+  writeSnapshotDataVersion(data, result.version, options);
+  appendSnapshotMigrationHistory(data, result.report, options);
+  return createSnapshotResult(data, payloadPath, result);
+}
+
+async function runSnapshotPayloadMigrationAsync<TContainer, TPayload>(
+  registry: FrontierMigrationRegistry<TPayload>,
+  container: TContainer,
+  options: FrontierSnapshotMigrationOptions
+): Promise<FrontierSnapshotMigrationResult<TContainer, TPayload>> {
+  const targetContainer = options.dryRun === true ? cloneForSnapshot(container, options) : container;
+  const payloadPath = resolveSnapshotPayloadPath(targetContainer, options);
+  const payload = readSnapshotPayload(targetContainer, payloadPath);
+  const result = await registry.migrateAsync(payload, snapshotPayloadRunOptions(targetContainer, payload, options));
+  const data = writeSnapshotPayloadResult(targetContainer, payloadPath, result.data);
+  writeSnapshotDataVersion(data, result.version, options);
+  appendSnapshotMigrationHistory(data, result.report, options);
+  return createSnapshotResult(data, payloadPath, result);
+}
+
+function createSnapshotResult<TContainer, TPayload>(
+  data: TContainer,
+  payloadPath: FrontierMigrationPath | false,
+  result: FrontierMigrationResult<TPayload>
+): FrontierSnapshotMigrationResult<TContainer, TPayload> {
+  return {
+    kind: RESULT_KIND,
+    data,
+    version: result.version,
+    changed: result.changed,
+    report: result.report,
+    envelope: createVersionedEnvelope(result.version, data, {
+      source: result.report.source,
+      plugin: result.report.plugin,
+      api: result.report.api,
+      metadata: result.report.metadata
+    }),
+    payload: result.data,
+    payloadPath
+  };
+}
+
+function snapshotPayloadRunOptions(
+  container: unknown,
+  payload: unknown,
+  options: FrontierSnapshotMigrationOptions
+): FrontierMigrationRunOptions {
+  const userGetVersion = options.getVersion;
+  const userSetVersion = options.setVersion;
+  const dataVersionPaths = options.dataVersionPaths ?? SYNCABLE_VERSION_PATHS;
+  return {
+    ...options,
+    source: options.source ?? 'frontier.snapshot',
+    versionPath: false,
+    writeVersion: false,
+    getVersion(data, runOptions) {
+      const explicit = userGetVersion?.(data, runOptions);
+      if (explicit !== undefined) return explicit;
+      const fromContainer = readFirstMigrationVersion(container, dataVersionPaths);
+      if (fromContainer !== undefined) return fromContainer;
+      return readFirstMigrationVersion(payload, [DEFAULT_VERSION_PATH]);
+    },
+    setVersion(data, version, runOptions) {
+      if (userSetVersion) userSetVersion(data, version, runOptions);
+    }
+  };
+}
+
+function resolveSnapshotPayloadPath(container: unknown, options: FrontierSnapshotMigrationOptions): FrontierMigrationPath | false {
+  if (options.payloadPath !== undefined) return options.payloadPath;
+  const candidates = options.payloadPaths ?? SYNCABLE_PAYLOAD_PATHS;
+  for (const path of candidates) {
+    if (readMigrationPath(container, path) !== undefined) return path;
+  }
+  return false;
+}
+
+function readSnapshotPayload(container: unknown, payloadPath: FrontierMigrationPath | false): unknown {
+  if (payloadPath === false) return container;
+  const payload = readMigrationPath(container, payloadPath);
+  if (payload === undefined) {
+    throw new FrontierMigrationError('missing-payload', `Snapshot migration payload path ${pathKey(payloadPath)} does not exist.`);
+  }
+  return payload;
+}
+
+function writeSnapshotPayloadResult<TContainer>(
+  container: TContainer,
+  payloadPath: FrontierMigrationPath | false,
+  payload: unknown
+): TContainer {
+  if (payloadPath === false) return payload as TContainer;
+  writeMigrationPath(container, payloadPath, payload);
+  return container;
+}
+
+function writeSnapshotDataVersion(container: unknown, version: string, options: FrontierSnapshotMigrationOptions): void {
+  const paths = options.writeDataVersionPaths ?? options.dataVersionPaths ?? SYNCABLE_WRITE_VERSION_PATHS;
+  if (paths.length === 0) return;
+  writeMigrationVersionPaths(container, version, paths, []);
+}
+
+function appendSnapshotMigrationHistory(container: unknown, report: FrontierMigrationReport, options: FrontierSnapshotMigrationOptions): void {
+  if (options.appendHistory === false || options.appendHistory === undefined) return;
+  const path = options.appendHistory === true ? MIGRATION_HISTORY_PATH : options.appendHistory;
+  const current = readMigrationPath(container, path);
+  const entry: FrontierMigrationHistoryEntry = {
+    kind: 'frontier.migration.history.entry',
+    registryId: report.registryId,
+    fromVersion: report.fromVersion,
+    toVersion: report.toVersion,
+    targetVersion: report.targetVersion,
+    stepCount: report.stepCount,
+    steps: report.steps.map((step) => step.id),
+    source: report.source,
+    actor: report.actor,
+    at: new Date().toISOString()
+  };
+  if (Array.isArray(current)) {
+    current[current.length] = entry;
+    return;
+  }
+  if (current === undefined) {
+    writeMigrationPath(container, path, [entry]);
+    return;
+  }
+  writeMigrationPath(container, path, [current, entry]);
+}
+
+function cloneForSnapshot<T>(container: T, options: FrontierSnapshotMigrationOptions): T {
+  return (options.clone || defaultClone)(container);
+}
+
+function rewritePatchLogs(container: unknown, rules: readonly FrontierPatchPathRewriteRule[], paths: readonly FrontierMigrationPath[]): void {
+  for (const path of paths) {
+    const value = readMigrationPath(container, path);
+    if (value !== undefined) writeMigrationPath(container, path, rewritePatchPaths(value, rules));
+  }
+}
+
+function rewritePatchContainer(value: unknown, rules: readonly FrontierPatchPathRewriteRule[], depth: number): unknown {
+  if (depth > 64 || value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    if (isPatchTuple(value)) {
+      value[1] = rewritePathLike(value[1] as FrontierMigrationPath, rules);
+      for (let i = 2; i < value.length; i++) value[i] = rewritePatchContainer(value[i], rules, depth + 1);
+      return value;
+    }
+    for (let i = 0; i < value.length; i++) value[i] = rewritePatchContainer(value[i], rules, depth + 1);
+    return value;
+  }
+  const record = value as Record<PropertyKey, unknown>;
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === 'path' && isPatchPathLike(item)) {
+      record[key] = rewritePathLike(item, rules);
+    } else if (key === 'paths' && Array.isArray(item)) {
+      record[key] = item.map((path) => isPatchPathLike(path) ? rewritePathLike(path, rules) : rewritePatchContainer(path, rules, depth + 1));
+    } else {
+      record[key] = rewritePatchContainer(item, rules, depth + 1);
+    }
+  }
+  return value;
+}
+
+function isPatchTuple(value: readonly unknown[]): boolean {
+  return value.length >= 2 && (typeof value[0] === 'number' || typeof value[0] === 'string') && isPatchPathLike(value[1]);
+}
+
+function isPatchPathLike(value: unknown): value is FrontierMigrationPath {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      if (typeof value[i] !== 'string' && typeof value[i] !== 'number') return false;
+    }
+    return true;
+  }
+  return typeof value === 'string' && value[0] === '/';
+}
+
+function rewritePathLike(path: FrontierMigrationPath, rules: readonly FrontierPatchPathRewriteRule[]): FrontierMigrationPath {
+  const parts = parseMigrationPath(path);
+  for (const rule of rules) {
+    const from = parseMigrationPath(rule.from);
+    const exact = parts.length === from.length && pathPartsEqual(parts, from);
+    const prefix = rule.prefix === true && pathStartsWith(parts, from);
+    if (!exact && !prefix) continue;
+    const to = parseMigrationPath(rule.to);
+    const next = exact ? to : to.concat(parts.slice(from.length));
+    return formatMigrationPathLike(next, path);
+  }
+  return path;
+}
+
+function pathPartsEqual(left: readonly FrontierMigrationPathPart[], right: readonly FrontierMigrationPathPart[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) if (left[i] !== right[i]) return false;
+  return true;
+}
+
+function pathStartsWith(parts: readonly FrontierMigrationPathPart[], prefix: readonly FrontierMigrationPathPart[]): boolean {
+  if (prefix.length > parts.length) return false;
+  for (let i = 0; i < prefix.length; i++) if (parts[i] !== prefix[i]) return false;
+  return true;
+}
+
+function formatMigrationPathLike(parts: readonly FrontierMigrationPathPart[], template: FrontierMigrationPath): FrontierMigrationPath {
+  if (typeof template !== 'string') return parts.slice();
+  if (template === '' || template[0] !== '/') return parts.join('.');
+  return '/' + parts.map((part) => String(part).replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
 }
 
 async function readRequired<TInput, TCurrent>(options: FrontierMigrationBoundaryOptions<TInput, TCurrent>): Promise<TInput> {
