@@ -4,6 +4,7 @@ import {
   createPatchPathRewriteRule,
   createMigrationRegistry,
   createPathMoveMigration,
+  inspectMigrationRegistry,
   migrateDomSerializedState,
   migrateSyncableSnapshot,
   rewritePatchPaths
@@ -44,8 +45,15 @@ for (let i = 0; i < cases; i++) {
   const registry = createMigrationRegistry({
     id: 'fuzz-' + i,
     currentVersion: String(steps + 1),
+    initialVersion: '0',
     migrations
   });
+  const graph = registry.inspect();
+  assert.strictEqual(graph.valid, true);
+  assert.deepStrictEqual(graph.rootVersions, ['0']);
+  assert.deepStrictEqual(graph.headVersions, [String(steps + 1)]);
+  assert.strictEqual(graph.edges.length, steps + 1);
+  assert.strictEqual(graph.nodes.length, steps + 2);
   const result = registry.migrate(input);
   assert.strictEqual(result.version, String(steps + 1));
   assert.strictEqual(result.data.$version, String(steps + 1));
@@ -139,6 +147,35 @@ for (let i = 0; i < cases; i++) {
   const rewriteRule = createPatchPathRewriteRule('/entity/value0', '/entity/current', { prefix: false });
   const rewritten = rewritePatchPaths([[0, ['entity', 'value0'], i]], [rewriteRule]);
   assert.deepStrictEqual(rewritten[0][1], ['entity', 'current']);
+
+  const branched = inspectMigrationRegistry({
+    id: 'branch-fuzz-' + i,
+    currentVersion: '2',
+    migrations: [
+      createPathMoveMigration({ id: 'main-' + i, from: '0', to: '1', read: '/a', write: '/b' }),
+      createPathMoveMigration({ id: 'alt-' + i, from: '0', to: 'alt', read: '/a', write: '/c' })
+    ]
+  });
+  assert.strictEqual(branched.valid, true);
+  assert.ok(branched.issues.some((issue) => issue.code === 'multiple-heads'));
+
+  assert.throws(() => createMigrationRegistry({
+    id: 'invalid-cycle-' + i,
+    currentVersion: '1',
+    migrations: [
+      createPathMoveMigration({ id: 'cycle-a-' + i, from: '0', to: '1', read: '/a', write: '/b' }),
+      createPathMoveMigration({ id: 'cycle-b-' + i, from: '1', to: '0', read: '/b', write: '/a' })
+    ]
+  }), /contains a cycle/);
+
+  assert.throws(() => createMigrationRegistry({
+    id: 'invalid-duplicate-' + i,
+    currentVersion: '1',
+    migrations: [
+      createPathMoveMigration({ id: 'dup-a-' + i, from: '0', to: '1', read: '/a', write: '/b' }),
+      createPathMoveMigration({ id: 'dup-b-' + i, from: '0', to: '1', read: '/a', write: '/c' })
+    ]
+  }), /duplicate step/);
 }
 
 console.log(`frontier migrations fuzz passed: cases=${cases}`);

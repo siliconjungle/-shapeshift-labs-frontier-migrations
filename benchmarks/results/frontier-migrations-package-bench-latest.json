@@ -1,0 +1,76 @@
+{
+  "package": "@shapeshift-labs/frontier-migrations",
+  "version": "0.1.2",
+  "generatedAt": "2026-05-29T06:13:18.193Z",
+  "node": "v26.1.0",
+  "platform": "darwin arm64",
+  "count": 10000,
+  "rounds": 20,
+  "rows": [
+    {
+      "fixture": "plan-chain-3",
+      "medianUs": 1.9159999999978083,
+      "p95Us": 9.04199999999733
+    },
+    {
+      "fixture": "explain-chain-3",
+      "medianUs": 8.207999999996218,
+      "p95Us": 16.916999999999405
+    },
+    {
+      "fixture": "inspect-graph-chain-64",
+      "medianUs": 0.16699999999758575,
+      "p95Us": 1.624999999997101
+    },
+    {
+      "fixture": "plan-chain-64",
+      "medianUs": 12.541999999996278,
+      "p95Us": 42.33299999999929
+    },
+    {
+      "fixture": "migrate-small-object-chain-3",
+      "medianUs": 9.624999999999773,
+      "p95Us": 48.24999999999591
+    },
+    {
+      "fixture": "migrate-envelope-chain-3",
+      "medianUs": 11.499999999998067,
+      "p95Us": 17.66600000000551
+    },
+    {
+      "fixture": "migrate-dry-run-chain-3",
+      "medianUs": 9.166000000000452,
+      "p95Us": 13.87499999999875
+    },
+    {
+      "fixture": "migrate-dom-state-chain-3",
+      "medianUs": 13.249999999999318,
+      "p95Us": 128.83399999999767
+    },
+    {
+      "fixture": "migrate-dom-compiled-chain-3",
+      "medianUs": 10.749999999994486,
+      "p95Us": 21.0829999999973
+    },
+    {
+      "fixture": "migrate-artifact-chain-3",
+      "medianUs": 13.374999999996362,
+      "p95Us": 20.834000000000685
+    },
+    {
+      "fixture": "migrate-sync-snapshot-chain-3",
+      "medianUs": 17.250000000004206,
+      "p95Us": 70.58399999999665
+    },
+    {
+      "fixture": "rewrite-patch-paths-100",
+      "medianUs": 73.5830000000064,
+      "p95Us": 243.04099999999806
+    },
+    {
+      "fixture": "migrate-batch-10000",
+      "medianUs": 34988.54200000001,
+      "p95Us": 38530.58299999999
+    }
+  ]
+}

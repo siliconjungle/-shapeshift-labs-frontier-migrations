@@ -13,7 +13,8 @@ import {
   createMigrationRegistry,
   createPathMoveMigration,
   createPluginAdapter,
-  createVersionedEnvelope
+  createVersionedEnvelope,
+  inspectMigrationRegistry
 } from '@shapeshift-labs/frontier-migrations';
 
 const migrations = createMigrationRegistry({
@@ -64,6 +65,31 @@ const pluginAdapter = createPluginAdapter({
 
 const currentPayload = pluginAdapter.map({ id: 'plugin:1', label: 'Import me' });
 ```
+
+## Graph Diagnostics
+
+Registries expose a serializable migration graph so CI, devtools, Playwright/AI probes, and release scripts can inspect the same version topology that runtime planning uses.
+
+```ts
+const graph = migrations.inspect();
+
+console.log(graph.rootVersions);
+console.log(graph.headVersions);
+console.log(graph.issues);
+
+// Tooling can inspect a registry definition without constructing a runtime boundary.
+const status = inspectMigrationRegistry({
+  id: 'plugin-api',
+  currentVersion: '3',
+  initialVersion: '1',
+  migrations: [
+    createPathMoveMigration({ id: 'plugin.v1-v2', from: '1', to: '2', read: '/label', write: '/title' }),
+    createDefaultValueMigration({ id: 'plugin.v2-v3', from: '2', to: '3', path: '/enabled', value: true })
+  ]
+});
+```
+
+The graph reports duplicate migration ids, duplicate steps, cycles, unreachable targets, wildcard steps, multiple heads, and dead-end heads. Runtime registries reject error-level graph issues up front; warning-level issues remain inspectable for staged plugin/API import paths.
 
 ## DOM Snapshot And Compiled UI Migration
 
@@ -162,6 +188,7 @@ const migratedLog = migrateEventLogSnapshot(stateMigrations, eventLogSnapshot, {
 - The app runtime should operate on current data only.
 - Importers can read raw database snapshots, CRDT/server snapshots, local cache payloads, plugin payloads, third-party API payloads, fixture files, serialized DOM state, compiled DOM views, and render manifests.
 - `createMigrationRegistry(...)` plans deterministic version paths and throws on missing, cyclic, or ambiguous chains.
+- `registry.inspect()` and `inspectMigrationRegistry(...)` expose Django/Alembic-style graph diagnostics for branch, head, cycle, wildcard, and unreachable-version checks.
 - `migrate(...)` is sync and allocation-light for local storage and plugin adapters.
 - `migrateAsync(...)` supports async migration steps for boundary work that must consult external data.
 - `createVersionedEnvelope(...)` keeps durable snapshots self-describing without forcing a particular database schema.

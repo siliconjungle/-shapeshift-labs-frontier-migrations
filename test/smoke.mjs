@@ -16,6 +16,7 @@ import {
   migrateDomRenderManifest,
   migrateDomSerializedState,
   migrateEventLogSnapshot,
+  inspectMigrationRegistry,
   migrateSnapshotPayload,
   migrateStateCacheSnapshot,
   migrateSyncableSnapshot,
@@ -48,6 +49,38 @@ const registry = createMigrationRegistry({
     })
   ]
 });
+
+const graph = registry.inspect();
+assert.strictEqual(graph.kind, 'frontier.migration.graph');
+assert.strictEqual(graph.valid, true);
+assert.deepStrictEqual(graph.rootVersions, ['1']);
+assert.deepStrictEqual(graph.headVersions, ['3']);
+assert.deepStrictEqual(graph.nodes.map((node) => node.version), ['1', '2', '3']);
+assert.strictEqual(graph.edges.length, 2);
+assert.strictEqual(graph.edges[0].migrationId, 'todo.rename-title');
+
+const inspected = inspectMigrationRegistry({
+  id: 'branched',
+  currentVersion: '3',
+  migrations: [
+    createPathMoveMigration({ id: 'branch-main', from: '1', to: '2', read: '/a', write: '/b' }),
+    createPathMoveMigration({ id: 'branch-alt', from: '1', to: 'alt', read: '/a', write: '/c' })
+  ]
+});
+assert.strictEqual(inspected.valid, true);
+assert.ok(inspected.issues.some((issue) => issue.code === 'multiple-heads'));
+assert.ok(inspected.issues.some((issue) => issue.code === 'dead-end' && issue.version === 'alt'));
+
+assert.throws(() => createMigrationRegistry({
+  id: 'duplicate-id',
+  currentVersion: '3',
+  migrations: [
+    createPathMoveMigration({ id: 'dup', from: '1', to: '2', read: '/a', write: '/b' }),
+    createPathMoveMigration({ id: 'dup', from: '2', to: '3', read: '/b', write: '/c' })
+  ]
+}), /duplicate migration id/);
+
+assert.throws(() => registry.plan('3', { targetVersion: '1' }), /No migration step from 3 to 1/);
 
 const imported = { $version: 1, todos: [{ id: 'a', text: 'ship migrations' }] };
 const result = registry.migrate(imported, { source: 'idb:app-state', actor: 'local-user' });
@@ -87,6 +120,25 @@ const boundary = createMigrationBoundary({
 });
 const fromBoundary = await boundary.importAsync();
 assert.strictEqual(fromBoundary.data.todos[0].title, 'from boundary');
+
+const asyncRegistry = createMigrationRegistry({
+  id: 'async-state',
+  currentVersion: '2',
+  migrations: [
+    {
+      id: 'async-title',
+      from: '1',
+      to: '2',
+      async up(data, ctx) {
+        ctx.rename('/text', '/title');
+        return data;
+      }
+    }
+  ]
+});
+assert.throws(() => asyncRegistry.migrate({ $version: '1', text: 'sync call' }), /returned a promise/);
+const asyncResult = await asyncRegistry.migrateAsync({ $version: '1', text: 'async call' });
+assert.deepStrictEqual(asyncResult.data, { $version: '2', title: 'async call' });
 
 const pluginRegistry = createMigrationRegistry({
   id: 'plugin-payload',
@@ -314,6 +366,8 @@ assert.deepStrictEqual(rewrittenLog[0][1], ['tasks', 0, 'text']);
 assert.deepStrictEqual(rewrittenLog[1].patch[0][1], '/tasks/1/text');
 assert.deepStrictEqual(rewrittenLog[1].paths[0], ['tasks', 2, 'text']);
 assert.deepStrictEqual(patchLog[0][1], ['todos', 0, 'text']);
+assert.deepStrictEqual(patchLog[1].patch[0][1], '/todos/1/text');
+assert.deepStrictEqual(patchLog[1].paths[0], ['todos', 2, 'text']);
 
 const eventLogSnapshot = {
   metadata: { dataVersion: '1' },

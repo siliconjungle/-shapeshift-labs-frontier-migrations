@@ -66,10 +66,18 @@ const syncRegistry = createMigrationRegistry({
   ]
 });
 const patchRewriteRule = createPatchPathRewriteRule('/items', '/records', { prefix: true });
+const longChainRegistry = createMigrationRegistry({
+  id: 'bench-long-chain',
+  currentVersion: '64',
+  initialVersion: '0',
+  migrations: makeChainMigrations('long', 64)
+});
 
 const rows = [
   measure('plan-chain-3', () => registry.plan('1').migrations.length),
   measure('explain-chain-3', () => registry.explain(makeState(0)).stepCount),
+  measure('inspect-graph-chain-64', () => longChainRegistry.inspect().nodes.length),
+  measure('plan-chain-64', () => longChainRegistry.plan('0').migrations.length),
   measure('migrate-small-object-chain-3', () => registry.migrate(makeState(1)).data.records.length),
   measure('migrate-envelope-chain-3', () => registry.migrate(createVersionedEnvelope('1', makeState(2))).data.records.length),
   measure('migrate-dry-run-chain-3', () => registry.migrate(makeState(3), { dryRun: true }).data.records.length),
@@ -182,6 +190,20 @@ function makeCompiledView(index) {
     },
     diagnostics: []
   };
+}
+
+function makeChainMigrations(prefix, steps) {
+  const out = new Array(steps);
+  for (let i = 0; i < steps; i++) {
+    out[i] = createPathMoveMigration({
+      id: prefix + '-' + i,
+      from: String(i),
+      to: String(i + 1),
+      read: '/value' + i,
+      write: '/value' + (i + 1)
+    });
+  }
+  return out;
 }
 
 function measure(fixture, fn, localRounds = rounds) {

@@ -257,12 +257,57 @@ export interface FrontierMigrationPlan {
   readonly checksums: readonly string[];
 }
 
+export type FrontierMigrationGraphIssueSeverity = 'error' | 'warning';
+
+export interface FrontierMigrationGraphIssue {
+  readonly severity: FrontierMigrationGraphIssueSeverity;
+  readonly code: string;
+  readonly message: string;
+  readonly version?: string;
+  readonly migrationId?: string;
+  readonly detail?: unknown;
+}
+
+export interface FrontierMigrationGraphNode {
+  readonly version: string;
+  readonly incoming: readonly string[];
+  readonly outgoing: readonly string[];
+  readonly isRoot: boolean;
+  readonly isHead: boolean;
+  readonly reachable: boolean;
+}
+
+export interface FrontierMigrationGraphEdge {
+  readonly id: string;
+  readonly migrationId: string;
+  readonly from: string;
+  readonly to: string;
+  readonly checksum: string;
+  readonly wildcard: boolean;
+  readonly irreversible: boolean;
+  readonly tags: readonly string[];
+}
+
+export interface FrontierMigrationGraph {
+  readonly kind: 'frontier.migration.graph';
+  readonly registryId: string;
+  readonly currentVersion: string;
+  readonly initialVersion?: string;
+  readonly rootVersions: readonly string[];
+  readonly headVersions: readonly string[];
+  readonly nodes: readonly FrontierMigrationGraphNode[];
+  readonly edges: readonly FrontierMigrationGraphEdge[];
+  readonly issues: readonly FrontierMigrationGraphIssue[];
+  readonly valid: boolean;
+}
+
 export interface FrontierMigrationRegistry<TCurrent = unknown> {
   readonly id: string;
   readonly currentVersion: string;
   readonly migrations: readonly FrontierMigration<any, any>[];
   plan(fromVersion: FrontierMigrationVersion, options?: Pick<FrontierMigrationRunOptions, 'targetVersion'>): FrontierMigrationPlan;
   explain(input: unknown, options?: FrontierMigrationRunOptions): FrontierMigrationReport;
+  inspect(): FrontierMigrationGraph;
   migrate<T = unknown>(input: T, options?: FrontierMigrationRunOptions): FrontierMigrationResult<TCurrent>;
   migrateAsync<T = unknown>(input: T, options?: FrontierMigrationRunOptions): Promise<FrontierMigrationResult<TCurrent>>;
   boundary<T = unknown>(boundary: FrontierMigrationBoundaryOptions<T, TCurrent>): FrontierMigrationBoundary<T, TCurrent>;
@@ -357,6 +402,7 @@ const ARTIFACT_KIND = 'frontier.migration.artifact';
 const RESULT_KIND = 'frontier.migration.result';
 const REPORT_KIND = 'frontier.migration.report';
 const PLAN_KIND = 'frontier.migration.plan';
+const GRAPH_KIND = 'frontier.migration.graph';
 const DEFAULT_VERSION_PATH: readonly FrontierMigrationPathPart[] = ['$version'];
 const DOM_STATE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/source/dataVersion', '/manifest/source/dataVersion', '/metadata/dataVersion'];
 const DOM_STATE_WRITE_PATHS: readonly FrontierMigrationPath[] = ['/source/dataVersion'];
@@ -379,25 +425,41 @@ const EVENT_LOG_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/metadata/da
 const EVENT_LOG_WRITE_VERSION_PATHS: readonly FrontierMigrationPath[] = ['/metadata/dataVersion'];
 const MIGRATION_HISTORY_PATH: FrontierMigrationPath = '/metadata/migrations';
 
+interface MigrationGraphIndex {
+  readonly byFrom: ReadonlyMap<string, readonly FrontierMigration<any, any>[]>;
+  readonly wildcard: readonly FrontierMigration<any, any>[];
+  readonly checksums: ReadonlyMap<FrontierMigration<any, any>, string>;
+  readonly graph: FrontierMigrationGraph;
+}
+
+interface CompiledPatchPathRewriteRule {
+  readonly from: FrontierMigrationPath;
+  readonly to: FrontierMigrationPath;
+  readonly prefix?: boolean;
+  readonly fromParts: readonly FrontierMigrationPathPart[];
+  readonly toParts: readonly FrontierMigrationPathPart[];
+}
+
 export function createMigrationRegistry<TCurrent = unknown>(
   options: FrontierMigrationRegistryOptions
 ): FrontierMigrationRegistry<TCurrent> {
   const registryId = options.id || 'frontier.migrations';
   const currentVersion = normalizeVersion(options.currentVersion);
   const migrations = Object.freeze((options.migrations || []).slice());
-  assertMigrationGraph(registryId, migrations);
+  const graphIndex = createMigrationGraphIndex(registryId, currentVersion, options.initialVersion, migrations);
+  assertMigrationGraph(registryId, graphIndex.graph);
 
   function plan(fromVersion: FrontierMigrationVersion, planOptions: Pick<FrontierMigrationRunOptions, 'targetVersion'> = {}): FrontierMigrationPlan {
     const start = normalizeVersion(fromVersion);
     const target = normalizeVersion(planOptions.targetVersion ?? currentVersion);
-    const path = planMigrationPath(registryId, migrations, start, target);
+    const path = planMigrationPath(registryId, graphIndex, start, target);
     return {
       kind: PLAN_KIND,
       registryId,
       fromVersion: start,
       targetVersion: target,
       migrations: path,
-      checksums: path.map(createMigrationChecksum)
+      checksums: path.map((migration) => migrationChecksum(graphIndex, migration))
     };
   }
 
@@ -418,7 +480,7 @@ export function createMigrationRegistry<TCurrent = unknown>(
         from: primaryFromVersion(migration.from, resolved.fromVersion),
         to: normalizeVersion(migration.to),
         direction: 'up',
-        checksum: createMigrationChecksum(migration),
+        checksum: migrationChecksum(graphIndex, migration),
         reads: migration.reads || [],
         writes: migration.writes || [],
         elapsedMs: 0
@@ -428,15 +490,19 @@ export function createMigrationRegistry<TCurrent = unknown>(
     });
   }
 
+  function inspect(): FrontierMigrationGraph {
+    return graphIndex.graph;
+  }
+
   function migrate<T = unknown>(input: T, runOptions: FrontierMigrationRunOptions = {}): FrontierMigrationResult<TCurrent> {
-    return runMigrationsSync<TCurrent>(registryId, currentVersion, migrations, input, options, runOptions);
+    return runMigrationsSync<TCurrent>(registryId, currentVersion, graphIndex, input, options, runOptions);
   }
 
   async function migrateAsync<T = unknown>(
     input: T,
     runOptions: FrontierMigrationRunOptions = {}
   ): Promise<FrontierMigrationResult<TCurrent>> {
-    return runMigrationsAsync<TCurrent>(registryId, currentVersion, migrations, input, options, runOptions);
+    return runMigrationsAsync<TCurrent>(registryId, currentVersion, graphIndex, input, options, runOptions);
   }
 
   function boundary<T = unknown>(boundaryOptions: FrontierMigrationBoundaryOptions<T, TCurrent>): FrontierMigrationBoundary<T, TCurrent> {
@@ -459,6 +525,7 @@ export function createMigrationRegistry<TCurrent = unknown>(
     migrations,
     plan,
     explain,
+    inspect,
     migrate,
     migrateAsync,
     boundary,
@@ -479,6 +546,17 @@ export function migrateToCurrentAsync<TCurrent = unknown>(
   options: FrontierMigrationRegistryOptions & FrontierMigrationRunOptions
 ): Promise<FrontierMigrationResult<TCurrent>> {
   return createMigrationRegistry<TCurrent>(options).migrateAsync(input, options);
+}
+
+export function inspectMigrationRegistry(
+  options: Pick<FrontierMigrationRegistryOptions, 'id' | 'currentVersion' | 'initialVersion' | 'migrations'>
+): FrontierMigrationGraph {
+  return createMigrationGraphIndex(
+    options.id || 'frontier.migrations',
+    normalizeVersion(options.currentVersion),
+    options.initialVersion,
+    options.migrations || []
+  ).graph;
 }
 
 export function createMigrationBoundary<TInput = unknown, TCurrent = unknown>(
@@ -789,13 +867,14 @@ export function createPatchPathRewriteRule(
 }
 
 export function rewritePatchPath<T extends FrontierMigrationPath>(path: T, rules: readonly FrontierPatchPathRewriteRule[]): T {
-  return rewritePathLike(path, rules) as T;
+  return rewritePathLike(path, compilePatchPathRewriteRules(rules)) as T;
 }
 
 export function rewritePatchPaths<T>(input: T, rules: readonly FrontierPatchPathRewriteRule[], options: FrontierPatchPathRewriteOptions = {}): T {
   if (rules.length === 0) return input;
-  const target = options.clone === false ? input : defaultClone(input);
-  return rewritePatchContainer(target, rules, 0) as T;
+  const compiledRules = compilePatchPathRewriteRules(rules);
+  if (options.clone === false) return rewritePatchContainer(input, compiledRules, 0) as T;
+  return rewritePatchContainerClone(input, compiledRules, 0) as T;
 }
 
 export function normalizeMigrationVersion(version: FrontierMigrationVersion): string {
@@ -941,7 +1020,7 @@ export function createInMemoryMigrationLedger(): FrontierMigrationLedger {
 function runMigrationsSync<TCurrent>(
   registryId: string,
   currentVersion: string,
-  migrations: readonly FrontierMigration[],
+  graphIndex: MigrationGraphIndex,
   input: unknown,
   registryOptions: FrontierMigrationRegistryOptions,
   runOptions: FrontierMigrationRunOptions
@@ -950,7 +1029,7 @@ function runMigrationsSync<TCurrent>(
   const warnings: FrontierMigrationWarning[] = [];
   const resolved = resolveInput(input, registryOptions, runOptions);
   const targetVersion = normalizeVersion(runOptions.targetVersion ?? currentVersion);
-  const migrationPlan = planMigrationPath(registryId, migrations, resolved.fromVersion, targetVersion);
+  const migrationPlan = planMigrationPath(registryId, graphIndex, resolved.fromVersion, targetVersion);
   const data = runOptions.dryRun === true || isVersionedEnvelope(input)
     ? cloneWithOptions(resolved.data, registryOptions, runOptions)
     : resolved.data;
@@ -981,7 +1060,7 @@ function runMigrationsSync<TCurrent>(
     if (output !== undefined) cursor = output;
     const fromTraceVersion = version;
     version = toVersion;
-    const trace = stepTrace(migration, primaryFromVersion(migration.from, fromTraceVersion), toVersion, stepStarted);
+    const trace = stepTrace(migration, primaryFromVersion(migration.from, fromTraceVersion), toVersion, stepStarted, migrationChecksum(graphIndex, migration));
     steps.push(trace);
     runOptions.onStep?.(trace);
   }
@@ -1019,7 +1098,7 @@ function runMigrationsSync<TCurrent>(
 async function runMigrationsAsync<TCurrent>(
   registryId: string,
   currentVersion: string,
-  migrations: readonly FrontierMigration[],
+  graphIndex: MigrationGraphIndex,
   input: unknown,
   registryOptions: FrontierMigrationRegistryOptions,
   runOptions: FrontierMigrationRunOptions
@@ -1028,7 +1107,7 @@ async function runMigrationsAsync<TCurrent>(
   const warnings: FrontierMigrationWarning[] = [];
   const resolved = resolveInput(input, registryOptions, runOptions);
   const targetVersion = normalizeVersion(runOptions.targetVersion ?? currentVersion);
-  const migrationPlan = planMigrationPath(registryId, migrations, resolved.fromVersion, targetVersion);
+  const migrationPlan = planMigrationPath(registryId, graphIndex, resolved.fromVersion, targetVersion);
   const data = runOptions.dryRun === true || isVersionedEnvelope(input)
     ? cloneWithOptions(resolved.data, registryOptions, runOptions)
     : resolved.data;
@@ -1053,7 +1132,7 @@ async function runMigrationsAsync<TCurrent>(
     if (output !== undefined) cursor = output;
     const fromTraceVersion = version;
     version = toVersion;
-    const trace = stepTrace(migration, primaryFromVersion(migration.from, fromTraceVersion), toVersion, stepStarted);
+    const trace = stepTrace(migration, primaryFromVersion(migration.from, fromTraceVersion), toVersion, stepStarted, migrationChecksum(graphIndex, migration));
     steps.push(trace);
     runOptions.onStep?.(trace);
   }
@@ -1115,7 +1194,7 @@ function resolveInput(
 
 function planMigrationPath(
   registryId: string,
-  migrations: readonly FrontierMigration<any, any>[],
+  graphIndex: MigrationGraphIndex,
   fromVersion: string,
   targetVersion: string
 ): FrontierMigration<any, any>[] {
@@ -1128,8 +1207,8 @@ function planMigrationPath(
       throw new FrontierMigrationError('cycle', `Migration graph ${registryId} contains a cycle at version ${current}.`);
     }
     visited.add(current);
-    const exact = migrations.filter((migration) => migrationMatchesFrom(migration, current));
-    const candidates = exact.length > 0 ? exact : migrations.filter((migration) => migration.from === '*');
+    const exact = graphIndex.byFrom.get(current);
+    const candidates = exact && exact.length > 0 ? exact : graphIndex.wildcard;
     if (candidates.length === 0) {
       throw new FrontierMigrationError('missing-step', `No migration step from ${current} to ${targetVersion}.`, { fromVersion, targetVersion, current });
     }
@@ -1146,24 +1225,315 @@ function planMigrationPath(
   return path;
 }
 
-function assertMigrationGraph(registryId: string, migrations: readonly FrontierMigration<any, any>[]): void {
-  const seen = new Set<string>();
-  for (const migration of migrations) {
-    if (!migration.id) throw new FrontierMigrationError('invalid-migration', `Migration registry ${registryId} contains a migration without an id.`);
-    const fromList = migration.from === '*'
-      ? ['*']
-      : typeof migration.from !== 'string' && typeof migration.from !== 'number'
-        ? migration.from.map(normalizeVersion)
-        : [normalizeVersion(migration.from)];
-    const to = normalizeVersion(migration.to);
+function assertMigrationGraph(registryId: string, graph: FrontierMigrationGraph): void {
+  const issue = graph.issues.find((item) => item.severity === 'error');
+  if (!issue) return;
+  throw new FrontierMigrationError(issue.code, issue.message || `Migration registry ${registryId} is invalid.`, issue.detail);
+}
+
+function createMigrationGraphIndex(
+  registryId: string,
+  currentVersion: string,
+  initialVersion: FrontierMigrationVersion | undefined,
+  migrations: readonly FrontierMigration<any, any>[]
+): MigrationGraphIndex {
+  const byFrom = new Map<string, FrontierMigration<any, any>[]>();
+  const wildcard: FrontierMigration<any, any>[] = [];
+  const checksums = new Map<FrontierMigration<any, any>, string>();
+  const nodeMap = new Map<string, { version: string; incoming: string[]; outgoing: string[] }>();
+  const edges: FrontierMigrationGraphEdge[] = [];
+  const issues: FrontierMigrationGraphIssue[] = [];
+  const seenIds = new Set<string>();
+  const seenSteps = new Map<string, string>();
+  const adjacency = new Map<string, string[]>();
+  const normalizedInitialVersion = initialVersion === undefined ? undefined : normalizeVersion(initialVersion);
+
+  ensureGraphNode(nodeMap, currentVersion);
+  if (normalizedInitialVersion !== undefined) ensureGraphNode(nodeMap, normalizedInitialVersion);
+
+  for (let index = 0; index < migrations.length; index++) {
+    const migration = migrations[index];
+    const migrationId = migration.id || `migration:${index}`;
+    if (!migration.id) {
+      issues.push({
+        severity: 'error',
+        code: 'invalid-migration',
+        message: `Migration registry ${registryId} contains a migration without an id.`,
+        migrationId
+      });
+    } else if (seenIds.has(migration.id)) {
+      issues.push({
+        severity: 'error',
+        code: 'duplicate-id',
+        message: `Migration registry ${registryId} contains duplicate migration id ${migration.id}.`,
+        migrationId: migration.id
+      });
+    }
+    seenIds.add(migrationId);
+
+    const to = safeNormalizeGraphVersion(migration.to, issues, {
+      code: 'invalid-to-version',
+      message: `Migration ${migrationId} has an invalid target version.`,
+      migrationId
+    });
+    if (to === undefined) continue;
+
+    ensureGraphNode(nodeMap, to);
+    const checksum = migration.checksum || createMigrationChecksum(migration);
+    checksums.set(migration, checksum);
+    const fromList = expandMigrationFromVersions(registryId, migration, migrationId, issues);
     for (const from of fromList) {
-      const key = from + '->' + to;
-      if (seen.has(key)) {
-        throw new FrontierMigrationError('duplicate-step', `Migration registry ${registryId} contains duplicate step ${key}.`);
+      const wildcardStep = from === '*';
+      const edgeId = migrationId + ':' + from + '->' + to;
+      const edge: FrontierMigrationGraphEdge = {
+        id: edgeId,
+        migrationId,
+        from,
+        to,
+        checksum,
+        wildcard: wildcardStep,
+        irreversible: migration.irreversible === true,
+        tags: migration.tags || []
+      };
+      edges.push(edge);
+
+      if (wildcardStep) {
+        wildcard.push(migration);
+        ensureGraphNode(nodeMap, to).incoming.push(edgeId);
+        issues.push({
+          severity: 'warning',
+          code: 'wildcard-step',
+          message: `Migration ${migrationId} uses a wildcard source version; static graph reachability is approximate.`,
+          migrationId,
+          detail: { to }
+        });
+        continue;
       }
-      seen.add(key);
+
+      const fromNode = ensureGraphNode(nodeMap, from);
+      const toNode = ensureGraphNode(nodeMap, to);
+      fromNode.outgoing.push(edgeId);
+      toNode.incoming.push(edgeId);
+      let fromBucket = byFrom.get(from);
+      if (fromBucket === undefined) {
+        fromBucket = [];
+        byFrom.set(from, fromBucket);
+      }
+      fromBucket.push(migration);
+      let adjacent = adjacency.get(from);
+      if (adjacent === undefined) {
+        adjacent = [];
+        adjacency.set(from, adjacent);
+      }
+      adjacent.push(to);
+
+      const stepKey = from + '->' + to;
+      const existingStep = seenSteps.get(stepKey);
+      if (existingStep !== undefined) {
+        issues.push({
+          severity: 'error',
+          code: 'duplicate-step',
+          message: `Migration registry ${registryId} contains duplicate step ${stepKey}.`,
+          migrationId,
+          detail: { existing: existingStep, duplicate: migrationId, step: stepKey }
+        });
+      } else {
+        seenSteps.set(stepKey, migrationId);
+      }
+      if (from === to) {
+        issues.push({
+          severity: 'error',
+          code: 'self-loop',
+          message: `Migration registry ${registryId} contains a self-loop at version ${from}.`,
+          version: from,
+          migrationId
+        });
+      }
     }
   }
+
+  const rootVersions = normalizedInitialVersion !== undefined
+    ? [normalizedInitialVersion]
+    : Array.from(nodeMap.values())
+      .filter((node) => node.incoming.length === 0)
+      .map((node) => node.version)
+      .sort(compareVersionText);
+  const reachable = collectReachableVersions(rootVersions, adjacency);
+  const cycleVersions = collectCycleVersions(Array.from(nodeMap.keys()), adjacency);
+  for (const version of cycleVersions) {
+    issues.push({
+      severity: 'error',
+      code: 'cycle',
+      message: `Migration graph ${registryId} contains a cycle at version ${version}.`,
+      version
+    });
+  }
+  if (normalizedInitialVersion !== undefined && !reachable.has(currentVersion)) {
+    issues.push({
+      severity: 'error',
+      code: 'unreachable-target',
+      message: `Migration registry ${registryId} cannot reach current version ${currentVersion} from initial version ${normalizedInitialVersion}.`,
+      version: currentVersion,
+      detail: { initialVersion: normalizedInitialVersion, currentVersion }
+    });
+  }
+
+  const headVersions = Array.from(nodeMap.values())
+    .filter((node) => node.outgoing.length === 0)
+    .map((node) => node.version)
+    .sort(compareVersionText);
+  const nonCurrentHeads = headVersions.filter((version) => version !== currentVersion);
+  if (headVersions.length > 1) {
+    issues.push({
+      severity: 'warning',
+      code: 'multiple-heads',
+      message: `Migration registry ${registryId} has multiple head versions: ${headVersions.join(', ')}.`,
+      detail: { headVersions }
+    });
+  }
+  for (const version of nonCurrentHeads) {
+    issues.push({
+      severity: 'warning',
+      code: 'dead-end',
+      message: `Migration registry ${registryId} has a non-current head version ${version}.`,
+      version
+    });
+  }
+
+  const sortedNodes = Array.from(nodeMap.values()).sort((left, right) => compareVersionText(left.version, right.version));
+  for (const node of sortedNodes) {
+    if (!reachable.has(node.version) && (normalizedInitialVersion !== undefined || rootVersions.length > 0)) {
+      issues.push({
+        severity: 'warning',
+        code: 'unreachable-version',
+        message: `Migration registry ${registryId} has an unreachable version ${node.version}.`,
+        version: node.version
+      });
+    }
+  }
+
+  const graph: FrontierMigrationGraph = {
+    kind: GRAPH_KIND,
+    registryId,
+    currentVersion,
+    ...(normalizedInitialVersion === undefined ? {} : { initialVersion: normalizedInitialVersion }),
+    rootVersions,
+    headVersions,
+    nodes: sortedNodes.map((node) => ({
+      version: node.version,
+      incoming: node.incoming.slice(),
+      outgoing: node.outgoing.slice(),
+      isRoot: rootVersions.includes(node.version),
+      isHead: headVersions.includes(node.version),
+      reachable: reachable.has(node.version)
+    })),
+    edges,
+    issues,
+    valid: !issues.some((issue) => issue.severity === 'error')
+  };
+
+  return { byFrom, wildcard, checksums, graph };
+}
+
+function ensureGraphNode(
+  nodeMap: Map<string, { version: string; incoming: string[]; outgoing: string[] }>,
+  version: string
+): { version: string; incoming: string[]; outgoing: string[] } {
+  let node = nodeMap.get(version);
+  if (node === undefined) {
+    node = { version, incoming: [], outgoing: [] };
+    nodeMap.set(version, node);
+  }
+  return node;
+}
+
+function expandMigrationFromVersions(
+  registryId: string,
+  migration: FrontierMigration<any, any>,
+  migrationId: string,
+  issues: FrontierMigrationGraphIssue[]
+): string[] {
+  if (migration.from === '*') return ['*'];
+  const raw = Array.isArray(migration.from) ? migration.from : [migration.from];
+  const out: string[] = [];
+  for (const value of raw) {
+    const normalized = safeNormalizeGraphVersion(value, issues, {
+      code: 'invalid-from-version',
+      message: `Migration ${migrationId} in registry ${registryId} has an invalid source version.`,
+      migrationId
+    });
+    if (normalized !== undefined) out.push(normalized);
+  }
+  return out;
+}
+
+function safeNormalizeGraphVersion(
+  version: unknown,
+  issues: FrontierMigrationGraphIssue[],
+  issue: Pick<FrontierMigrationGraphIssue, 'code' | 'message' | 'migrationId'>
+): string | undefined {
+  if (typeof version === 'string' || typeof version === 'number') return String(version);
+  issues.push({
+    severity: 'error',
+    code: issue.code,
+    message: issue.message,
+    migrationId: issue.migrationId,
+    detail: { version }
+  });
+  return undefined;
+}
+
+function collectReachableVersions(rootVersions: readonly string[], adjacency: ReadonlyMap<string, readonly string[]>): Set<string> {
+  const reachable = new Set<string>();
+  const stack = rootVersions.slice();
+  while (stack.length !== 0) {
+    const version = stack.pop() as string;
+    if (reachable.has(version)) continue;
+    reachable.add(version);
+    const next = adjacency.get(version);
+    if (next === undefined) continue;
+    for (let i = 0; i < next.length; i++) stack.push(next[i]);
+  }
+  return reachable;
+}
+
+function collectCycleVersions(nodes: readonly string[], adjacency: ReadonlyMap<string, readonly string[]>): string[] {
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const cycleVersions = new Set<string>();
+  const stack: string[] = [];
+
+  function visit(version: string): void {
+    if (visiting.has(version)) {
+      cycleVersions.add(version);
+      for (let i = stack.length - 1; i >= 0; i--) {
+        cycleVersions.add(stack[i]);
+        if (stack[i] === version) break;
+      }
+      return;
+    }
+    if (visited.has(version)) return;
+    visiting.add(version);
+    stack.push(version);
+    const next = adjacency.get(version);
+    if (next !== undefined) {
+      for (let i = 0; i < next.length; i++) visit(next[i]);
+    }
+    stack.pop();
+    visiting.delete(version);
+    visited.add(version);
+  }
+
+  for (const version of nodes) visit(version);
+  return Array.from(cycleVersions).sort(compareVersionText);
+}
+
+function compareVersionText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function migrationChecksum(graphIndex: MigrationGraphIndex, migration: FrontierMigration<any, any>): string {
+  return graphIndex.checksums.get(migration) || migration.checksum || createMigrationChecksum(migration);
 }
 
 function createMigrationContext(
@@ -1212,13 +1582,13 @@ function createMigrationContext(
   };
 }
 
-function stepTrace(migration: FrontierMigration<any, any>, from: string, to: string, started: number): FrontierMigrationStepTrace {
+function stepTrace(migration: FrontierMigration<any, any>, from: string, to: string, started: number, checksum: string): FrontierMigrationStepTrace {
   return {
     id: migration.id,
     from,
     to,
     direction: 'up',
-    checksum: migration.checksum || createMigrationChecksum(migration),
+    checksum,
     reads: migration.reads || [],
     writes: migration.writes || [],
     elapsedMs: now() - started
@@ -1289,14 +1659,6 @@ function validateData(
     api: runOptions.api,
     metadata: runOptions.metadata
   });
-}
-
-function migrationMatchesFrom(migration: FrontierMigration<any, any>, version: string): boolean {
-  if (migration.from === '*') return false;
-  if (typeof migration.from !== 'string' && typeof migration.from !== 'number') {
-    return migration.from.some((candidate) => normalizeVersion(candidate) === version);
-  }
-  return normalizeVersion(migration.from) === version;
 }
 
 function primaryFromVersion(from: FrontierMigration['from'], fallback: string): string {
@@ -1610,13 +1972,14 @@ function cloneForSnapshot<T>(container: T, options: FrontierSnapshotMigrationOpt
 }
 
 function rewritePatchLogs(container: unknown, rules: readonly FrontierPatchPathRewriteRule[], paths: readonly FrontierMigrationPath[]): void {
+  const compiledRules = compilePatchPathRewriteRules(rules);
   for (const path of paths) {
     const value = readMigrationPath(container, path);
-    if (value !== undefined) writeMigrationPath(container, path, rewritePatchPaths(value, rules));
+    if (value !== undefined) writeMigrationPath(container, path, rewritePatchContainerClone(value, compiledRules, 0));
   }
 }
 
-function rewritePatchContainer(value: unknown, rules: readonly FrontierPatchPathRewriteRule[], depth: number): unknown {
+function rewritePatchContainer(value: unknown, rules: readonly CompiledPatchPathRewriteRule[], depth: number): unknown {
   if (depth > 64 || value == null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     if (isPatchTuple(value)) {
@@ -1641,6 +2004,43 @@ function rewritePatchContainer(value: unknown, rules: readonly FrontierPatchPath
   return value;
 }
 
+function rewritePatchContainerClone(value: unknown, rules: readonly CompiledPatchPathRewriteRule[], depth: number): unknown {
+  if (depth > 64 || value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    const out = new Array(value.length);
+    if (isPatchTuple(value)) {
+      out[0] = value[0];
+      out[1] = rewritePathLike(value[1] as FrontierMigrationPath, rules);
+      for (let i = 2; i < value.length; i++) out[i] = rewritePatchContainerClone(value[i], rules, depth + 1);
+      return out;
+    }
+    for (let i = 0; i < value.length; i++) out[i] = rewritePatchContainerClone(value[i], rules, depth + 1);
+    return out;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return rewritePatchContainer(defaultClone(value), rules, depth);
+  }
+  const record = value as Record<PropertyKey, unknown>;
+  const out: Record<PropertyKey, unknown> = {};
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === 'path' && isPatchPathLike(item)) {
+      out[key] = rewritePathLike(item, rules);
+    } else if (key === 'paths' && Array.isArray(item)) {
+      const paths = new Array(item.length);
+      for (let i = 0; i < item.length; i++) {
+        const path = item[i];
+        paths[i] = isPatchPathLike(path) ? rewritePathLike(path, rules) : rewritePatchContainerClone(path, rules, depth + 1);
+      }
+      out[key] = paths;
+    } else {
+      out[key] = rewritePatchContainerClone(item, rules, depth + 1);
+    }
+  }
+  return out;
+}
+
 function isPatchTuple(value: readonly unknown[]): boolean {
   return value.length >= 2 && (typeof value[0] === 'number' || typeof value[0] === 'string') && isPatchPathLike(value[1]);
 }
@@ -1655,15 +2055,26 @@ function isPatchPathLike(value: unknown): value is FrontierMigrationPath {
   return typeof value === 'string' && value[0] === '/';
 }
 
-function rewritePathLike(path: FrontierMigrationPath, rules: readonly FrontierPatchPathRewriteRule[]): FrontierMigrationPath {
+function compilePatchPathRewriteRules(rules: readonly FrontierPatchPathRewriteRule[]): readonly CompiledPatchPathRewriteRule[] {
+  const out = new Array<CompiledPatchPathRewriteRule>(rules.length);
+  for (let i = 0; i < rules.length; i++) {
+    const rule = rules[i];
+    out[i] = {
+      ...rule,
+      fromParts: parseMigrationPath(rule.from),
+      toParts: parseMigrationPath(rule.to)
+    };
+  }
+  return out;
+}
+
+function rewritePathLike(path: FrontierMigrationPath, rules: readonly CompiledPatchPathRewriteRule[]): FrontierMigrationPath {
   const parts = parseMigrationPath(path);
   for (const rule of rules) {
-    const from = parseMigrationPath(rule.from);
-    const exact = parts.length === from.length && pathPartsEqual(parts, from);
-    const prefix = rule.prefix === true && pathStartsWith(parts, from);
+    const exact = parts.length === rule.fromParts.length && pathPartsEqual(parts, rule.fromParts);
+    const prefix = rule.prefix === true && pathStartsWith(parts, rule.fromParts);
     if (!exact && !prefix) continue;
-    const to = parseMigrationPath(rule.to);
-    const next = exact ? to : to.concat(parts.slice(from.length));
+    const next = exact ? rule.toParts : rule.toParts.concat(parts.slice(rule.fromParts.length));
     return formatMigrationPathLike(next, path);
   }
   return path;
