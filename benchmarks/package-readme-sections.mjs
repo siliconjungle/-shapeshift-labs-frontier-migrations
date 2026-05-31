@@ -304,6 +304,22 @@ if (!delegated) {
     "repoUrl": "https://github.com/siliconjungle/-shapeshift-labs-frontier-view"
   },
   {
+    "id": "frontier-canvas",
+    "name": "@shapeshift-labs/frontier-canvas",
+    "role": "Renderer-neutral infinite canvas surfaces for Frontier apps, including camera and viewport math, pan/zoom plans, grid materialization, snapping, hit testing, selection handles, extensible tool dispatch, frame records, registry graph output, and impact/proof helpers.",
+    "npmUrl": "https://www.npmjs.com/package/@shapeshift-labs/frontier-canvas",
+    "repoName": "siliconjungle/-shapeshift-labs-frontier-canvas",
+    "repoUrl": "https://github.com/siliconjungle/-shapeshift-labs-frontier-canvas"
+  },
+  {
+    "id": "frontier-canvas-tools",
+    "name": "@shapeshift-labs/frontier-canvas-tools",
+    "role": "Renderer-neutral editor tools, state machines, transform handles, permissions, async records, and AI action bridges for Frontier canvas surfaces.",
+    "npmUrl": "https://www.npmjs.com/package/@shapeshift-labs/frontier-canvas-tools",
+    "repoName": "siliconjungle/-shapeshift-labs-frontier-canvas-tools",
+    "repoUrl": "https://github.com/siliconjungle/-shapeshift-labs-frontier-canvas-tools"
+  },
+  {
     "id": "frontier-dom",
     "name": "@shapeshift-labs/frontier-dom",
     "role": "Patch-native DOM and host renderer bindings, manifest hydration, JSX runtime/compiler helpers, SSR, devtools, and logging bridges.",
